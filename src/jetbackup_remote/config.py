@@ -34,6 +34,7 @@ class OrchestratorConfig:
     """Orchestrator behavior settings."""
     poll_interval: int = 30
     job_timeout: int = 14400  # 4 hours
+    startup_timeout: int = 120  # 2 min to wait for job to start after trigger
     lock_file: str = "/tmp/jetbackup-remote.lock"
     log_file: str = "/var/log/jetbackup-remote.log"
     log_max_bytes: int = 10485760  # 10 MB
@@ -122,6 +123,7 @@ def _parse_orchestrator(data: dict) -> OrchestratorConfig:
     return OrchestratorConfig(
         poll_interval=data.get("poll_interval", 30),
         job_timeout=data.get("job_timeout", 14400),
+        startup_timeout=data.get("startup_timeout", 120),
         lock_file=data.get("lock_file", "/tmp/jetbackup-remote.lock"),
         log_file=data.get("log_file", "/var/log/jetbackup-remote.log"),
         log_max_bytes=data.get("log_max_bytes", 10485760),

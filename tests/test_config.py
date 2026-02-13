@@ -248,6 +248,7 @@ class TestOrchestratorConfigDefaults(unittest.TestCase):
         cfg = OrchestratorConfig()
         self.assertEqual(cfg.poll_interval, 30)
         self.assertEqual(cfg.job_timeout, 14400)
+        self.assertEqual(cfg.startup_timeout, 120)
         self.assertEqual(cfg.lock_file, "/tmp/jetbackup-remote.lock")
 
     def test_notification_defaults(self):

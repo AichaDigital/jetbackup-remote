@@ -108,13 +108,74 @@ class Orchestrator:
 
         return jobs
 
-    def _poll_job_completion(
+    def _wait_for_startup(
+        self,
+        server: Server,
+        job: Job,
+    ) -> bool:
+        """Wait for JetBackup to mark the job as running after trigger.
+
+        After runBackupJobManually, JetBackup queues the job asynchronously.
+        There is a race window where 'running' is still False. This method
+        polls until 'running=True' is observed, confirming the job started.
+
+        Args:
+            server: Target server.
+            job: The triggered job.
+
+        Returns:
+            True if job started (running=True seen).
+            False if startup_timeout expired without seeing running=True.
+        """
+        startup_timeout = self.config.orchestrator.startup_timeout
+        poll_interval = min(self.config.orchestrator.poll_interval, 10)
+        start_time = time.time()
+
+        logger.info(
+            "Waiting for %s on %s to start (up to %ds)...",
+            job.display_name, server.name, startup_timeout,
+        )
+
+        while True:
+            if self._shutdown_requested:
+                return False
+
+            elapsed = time.time() - start_time
+            if elapsed >= startup_timeout:
+                logger.warning(
+                    "Job %s on %s did not start within %ds",
+                    job.display_name, server.name, startup_timeout,
+                )
+                return False
+
+            try:
+                running = is_job_running(
+                    server, job.job_id, ssh_key=self.config.ssh_key,
+                )
+            except (JetBackupAPIError, SSHError) as e:
+                logger.warning(
+                    "Startup poll error for %s on %s: %s (will retry)",
+                    job.display_name, server.name, e,
+                )
+                time.sleep(poll_interval)
+                continue
+
+            if running:
+                logger.info(
+                    "Job %s on %s is now running (started after %.0fs)",
+                    job.display_name, server.name, elapsed,
+                )
+                return True
+
+            time.sleep(poll_interval)
+
+    def _poll_completion_only(
         self,
         server: Server,
         job: Job,
         job_run: JobRun,
     ) -> None:
-        """Poll until job finishes or timeout.
+        """Poll until running=False or timeout. Used when job is known to be running.
 
         Does NOT abort the job on timeout (would corrupt backup).
 
@@ -173,6 +234,41 @@ class Orchestrator:
             )
             time.sleep(poll_interval)
 
+    def _poll_job_completion(
+        self,
+        server: Server,
+        job: Job,
+        job_run: JobRun,
+    ) -> None:
+        """Two-phase poll: wait for startup, then wait for completion.
+
+        Phase 1 (startup): After trigger, wait until running=True is observed.
+        Phase 2 (completion): Once running, wait until running=False.
+
+        Does NOT abort the job on timeout (would corrupt backup).
+
+        Args:
+            server: Target server.
+            job: The job being polled.
+            job_run: JobRun state tracker.
+        """
+        # Phase 1: wait for job to actually start
+        started = self._wait_for_startup(server, job)
+
+        if self._shutdown_requested:
+            job_run.skip("Shutdown requested during startup wait")
+            return
+
+        if not started:
+            job_run.fail(
+                f"Job did not start within {self.config.orchestrator.startup_timeout}s "
+                f"after trigger"
+            )
+            return
+
+        # Phase 2: poll until job finishes
+        self._poll_completion_only(server, job, job_run)
+
     def _execute_job(self, job: Job) -> JobRun:
         """Execute a single job: trigger + poll.
 
@@ -222,6 +318,8 @@ class Orchestrator:
                 "Job %s on %s already running, waiting for completion...",
                 job.display_name, server.name,
             )
+            # Skip startup wait, go directly to completion poll
+            self._poll_completion_only(server, job, job_run)
         else:
             # Trigger the job
             try:
@@ -231,8 +329,9 @@ class Orchestrator:
                 self._current_job = None
                 return job_run
 
-        # Poll for completion
-        self._poll_job_completion(server, job, job_run)
+            # Two-phase poll: startup + completion
+            self._poll_job_completion(server, job, job_run)
+
         self._current_job = None
         return job_run
 

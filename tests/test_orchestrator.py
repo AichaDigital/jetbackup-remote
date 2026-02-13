@@ -37,6 +37,7 @@ def _make_config(jobs=None, servers=None):
         orchestrator=OrchestratorConfig(
             poll_interval=0.01,  # Fast for testing
             job_timeout=1,  # Short for testing
+            startup_timeout=0.5,  # Short for testing
             lock_file=lock_path,
         ),
         notification=NotificationConfig(),
@@ -138,10 +139,13 @@ class TestExecuteJob(unittest.TestCase):
     @patch("jetbackup_remote.orchestrator.run_job")
     @patch("jetbackup_remote.orchestrator.test_connection")
     def test_successful_execution(self, mock_test, mock_run, mock_is_running):
+        """Trigger → startup wait sees running=True → poll sees running=False."""
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
         mock_run.return_value = True
-        # First call: not running (trigger), second call: not running (poll done)
-        mock_is_running.side_effect = [False, False]
+        # 1: not running (check) → trigger
+        # 2: running (startup wait) → started
+        # 3: not running (completion poll) → done
+        mock_is_running.side_effect = [False, True, False]
 
         config = _make_config(jobs=[
             Job(job_id="job1", server_name="srv1", label="Backup1"),
@@ -157,8 +161,10 @@ class TestExecuteJob(unittest.TestCase):
     @patch("jetbackup_remote.orchestrator.run_job")
     @patch("jetbackup_remote.orchestrator.test_connection")
     def test_job_already_running(self, mock_test, mock_run, mock_is_running):
+        """Already running → skip trigger and startup, go to completion poll."""
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
-        # Already running, then finishes
+        # 1: already running (check) → skip trigger
+        # 2: not running (completion poll) → done
         mock_is_running.side_effect = [True, False]
 
         config = _make_config(jobs=[
@@ -207,10 +213,13 @@ class TestExecuteJob(unittest.TestCase):
     @patch("jetbackup_remote.orchestrator.run_job")
     @patch("jetbackup_remote.orchestrator.test_connection")
     def test_timeout_does_not_abort(self, mock_test, mock_run, mock_is_running):
+        """Job starts but never finishes → timeout without aborting."""
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
         mock_run.return_value = True
-        # Always running - will timeout
-        mock_is_running.side_effect = [False] + [True] * 200
+        # 1: not running (check) → trigger
+        # 2: running (startup) → started
+        # 3+: always running → eventually times out
+        mock_is_running.side_effect = [False, True] + [True] * 200
 
         config = _make_config(jobs=[
             Job(job_id="job1", server_name="srv1", label="Backup1"),
@@ -229,11 +238,40 @@ class TestExecuteJob(unittest.TestCase):
     @patch("jetbackup_remote.orchestrator.is_job_running")
     @patch("jetbackup_remote.orchestrator.run_job")
     @patch("jetbackup_remote.orchestrator.test_connection")
-    def test_multiple_jobs_sequential(self, mock_test, mock_run, mock_is_running):
+    def test_startup_timeout_fails(self, mock_test, mock_run, mock_is_running):
+        """Job triggered but never starts within startup_timeout → fail."""
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
         mock_run.return_value = True
-        # Each job: not running (check), not running (poll complete)
-        mock_is_running.side_effect = [False, False, False, False, False, False]
+        # 1: not running (check) → trigger
+        # 2+: never starts (always False) → startup timeout
+        mock_is_running.return_value = False
+
+        config = _make_config(jobs=[
+            Job(job_id="job1", server_name="srv1", label="Backup1"),
+        ])
+        config.orchestrator.startup_timeout = 0.05  # 50ms
+        config.orchestrator.poll_interval = 0.01
+
+        orch = Orchestrator(config)
+        result = orch.run()
+
+        self.assertEqual(result.total, 1)
+        self.assertEqual(result.failed, 1)
+        mock_run.assert_called_once()
+
+    @patch("jetbackup_remote.orchestrator.is_job_running")
+    @patch("jetbackup_remote.orchestrator.run_job")
+    @patch("jetbackup_remote.orchestrator.test_connection")
+    def test_multiple_jobs_sequential(self, mock_test, mock_run, mock_is_running):
+        """All 3 jobs run sequentially: check→trigger→startup→complete each."""
+        mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
+        mock_run.return_value = True
+        # Each job: False (check) → True (startup) → False (complete)
+        mock_is_running.side_effect = [
+            False, True, False,  # job1
+            False, True, False,  # job2
+            False, True, False,  # job3
+        ]
 
         config = _make_config()
         orch = Orchestrator(config)
@@ -252,7 +290,8 @@ class TestShutdown(unittest.TestCase):
     def test_shutdown_skips_remaining(self, mock_test, mock_run, mock_is_running):
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
         mock_run.return_value = True
-        mock_is_running.side_effect = [False, False]
+        # First job: False (check) → True (startup) → False (complete)
+        mock_is_running.side_effect = [False, True, False]
 
         config = _make_config()
         orch = Orchestrator(config)
@@ -287,12 +326,44 @@ class TestPollErrors(unittest.TestCase):
     @patch("jetbackup_remote.orchestrator.run_job")
     @patch("jetbackup_remote.orchestrator.test_connection")
     def test_poll_error_retries(self, mock_test, mock_run, mock_is_running):
+        """SSH error during completion poll is retried."""
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
         mock_run.return_value = True
-        # Not running (check), error (poll), not running (poll retry success)
+        # 1: not running (check) → trigger
+        # 2: running (startup) → started
+        # 3: error (completion poll) → retry
+        # 4: not running (completion poll) → done
+        mock_is_running.side_effect = [
+            False,
+            True,
+            SSHError("temporary failure"),
+            False,
+        ]
+
+        config = _make_config(jobs=[
+            Job(job_id="job1", server_name="srv1", label="Backup1"),
+        ])
+        config.orchestrator.poll_interval = 0.01
+        orch = Orchestrator(config)
+        result = orch.run()
+
+        self.assertEqual(result.completed, 1)
+
+    @patch("jetbackup_remote.orchestrator.is_job_running")
+    @patch("jetbackup_remote.orchestrator.run_job")
+    @patch("jetbackup_remote.orchestrator.test_connection")
+    def test_startup_error_retries(self, mock_test, mock_run, mock_is_running):
+        """SSH error during startup wait is retried."""
+        mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
+        mock_run.return_value = True
+        # 1: not running (check) → trigger
+        # 2: error (startup) → retry
+        # 3: running (startup) → started
+        # 4: not running (completion) → done
         mock_is_running.side_effect = [
             False,
             SSHError("temporary failure"),
+            True,
             False,
         ]
 

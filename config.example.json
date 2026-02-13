@@ -86,6 +86,7 @@
     "orchestrator": {
         "poll_interval": 30,
         "job_timeout": 14400,
+        "startup_timeout": 120,
         "lock_file": "/tmp/jetbackup-remote.lock",
         "log_file": "/var/log/jetbackup-remote.log",
         "log_max_bytes": 10485760,

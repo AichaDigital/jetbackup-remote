@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "jetbackup-remote"
+version = "0.1.0"
+description = "Remote orchestrator for JetBackup5 backup serialization"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.9"
+authors = [
+    {name = "Abdelkarim Mateos", email = "abdelkarim@aichadigital.es"},
+]
+keywords = ["jetbackup", "backup", "orchestrator", "serialization"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Archiving :: Backup",
+]
+
+[project.scripts]
+jetbackup-remote = "jetbackup_remote.cli:main"
+
+[project.urls]
+Repository = "https://github.com/AichaDigital/jetbackup-remote"
+
+[tool.setuptools.packages.find]
+where = ["src"]

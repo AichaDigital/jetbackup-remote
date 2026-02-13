@@ -1,0 +1,13 @@
+[Unit]
+Description=JetBackup Remote Orchestrator Timer
+Documentation=https://github.com/AichaDigital/jetbackup-remote
+
+[Timer]
+# Run daily at 02:00 local time
+OnCalendar=*-*-* 02:00:00
+# Add random delay up to 5 minutes to avoid exact-second collisions
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

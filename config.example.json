@@ -1,0 +1,105 @@
+{
+    "ssh_key": "/root/.ssh/id_ed25519",
+
+    "servers": {
+        "server1": {
+            "host": "server1.example.com",
+            "port": 51514,
+            "user": "root"
+        },
+        "server2": {
+            "host": "server2.example.com",
+            "port": 51514,
+            "user": "root"
+        },
+        "server3": {
+            "host": "server3.example.com",
+            "port": 51514,
+            "user": "root"
+        },
+        "server4": {
+            "host": "server4.example.com",
+            "port": 51514,
+            "user": "root"
+        }
+    },
+
+    "jobs": [
+        {
+            "job_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+            "server": "server1",
+            "label": "Accounts Backup",
+            "type": "accounts",
+            "priority": 0
+        },
+        {
+            "job_id": "bbbbbbbbbbbbbbbbbbbbbbbb",
+            "server": "server1",
+            "label": "Directories Backup",
+            "type": "directories",
+            "priority": 0
+        },
+        {
+            "job_id": "cccccccccccccccccccccccc",
+            "server": "server2",
+            "label": "Accounts Backup",
+            "type": "accounts",
+            "priority": 0
+        },
+        {
+            "job_id": "dddddddddddddddddddddd",
+            "server": "server2",
+            "label": "Directories Backup",
+            "type": "directories",
+            "priority": 0
+        },
+        {
+            "job_id": "eeeeeeeeeeeeeeeeeeeeeeee",
+            "server": "server3",
+            "label": "Accounts Backup",
+            "type": "accounts",
+            "priority": 0
+        },
+        {
+            "job_id": "ffffffffffffffffffffffff",
+            "server": "server3",
+            "label": "Directories Backup",
+            "type": "directories",
+            "priority": 0
+        },
+        {
+            "job_id": "111111111111111111111111",
+            "server": "server4",
+            "label": "Full Backup",
+            "type": "accounts",
+            "priority": 0
+        },
+        {
+            "job_id": "222222222222222222222222",
+            "server": "server4",
+            "label": "Database Backup",
+            "type": "database",
+            "priority": 0
+        }
+    ],
+
+    "orchestrator": {
+        "poll_interval": 30,
+        "job_timeout": 14400,
+        "lock_file": "/tmp/jetbackup-remote.lock",
+        "log_file": "/var/log/jetbackup-remote.log",
+        "log_max_bytes": 10485760,
+        "log_backup_count": 5
+    },
+
+    "notification": {
+        "enabled": false,
+        "smtp_host": "localhost",
+        "smtp_port": 25,
+        "from_address": "jetbackup-remote@orchestrator",
+        "to_addresses": ["admin@example.com"],
+        "on_failure": true,
+        "on_timeout": true,
+        "on_complete": false
+    }
+}

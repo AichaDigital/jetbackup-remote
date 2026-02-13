@@ -1,0 +1,28 @@
+[Unit]
+Description=JetBackup Remote Orchestrator
+Documentation=https://github.com/AichaDigital/jetbackup-remote
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -m jetbackup_remote -c /etc/jetbackup-remote/config.json run
+User=root
+Group=root
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jetbackup-remote
+
+# Security hardening
+ProtectSystem=strict
+ReadWritePaths=/var/log /tmp /etc/jetbackup-remote
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectHome=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+
+[Install]
+WantedBy=multi-user.target

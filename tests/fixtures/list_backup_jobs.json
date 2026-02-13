@@ -1,0 +1,16 @@
+[
+    {
+        "_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "Accounts Backup",
+        "type": 1,
+        "running": false,
+        "enabled": true
+    },
+    {
+        "_id": "bbbbbbbbbbbbbbbbbbbbbbbb",
+        "name": "Directories Backup",
+        "type": 2,
+        "running": false,
+        "enabled": true
+    }
+]

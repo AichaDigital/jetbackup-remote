@@ -1,0 +1,10 @@
+[
+    {
+        "_id": "abc123",
+        "type": 1,
+        "status": 2,
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "progress": 45,
+        "created": 1707800400
+    }
+]

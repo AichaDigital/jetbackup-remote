@@ -1,0 +1,14 @@
+{
+    "_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+    "name": "Accounts Backup",
+    "type": 1,
+    "running": false,
+    "enabled": true,
+    "destination": "raspberry",
+    "schedule": {
+        "type": "daily",
+        "time": "02:00"
+    },
+    "last_run": 1707800400,
+    "accounts": ["user1", "user2"]
+}

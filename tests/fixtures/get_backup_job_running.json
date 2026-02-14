@@ -1,14 +1,14 @@
 {
-    "_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
-    "name": "Accounts Backup",
-    "type": 1,
-    "running": true,
-    "enabled": true,
-    "destination": "raspberry",
-    "schedule": {
-        "type": "daily",
-        "time": "02:00"
-    },
-    "last_run": 1707800400,
-    "accounts": ["user1", "user2"]
+    "success": 1,
+    "message": "",
+    "data": {
+        "_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "Accounts Backup",
+        "type": 1,
+        "running": true,
+        "enabled": true,
+        "destination": ["dest1"],
+        "last_run": "2026-02-14T02:00:00+00:00",
+        "last_completed": "2026-02-13T01:30:00+00:00"
+    }
 }

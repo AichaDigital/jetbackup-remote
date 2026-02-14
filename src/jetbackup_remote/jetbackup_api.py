@@ -54,6 +54,9 @@ def get_job_status(
             f"Invalid JSON from getBackupJob on {server.name}: {result.stdout[:200]}"
         )
 
+    # JetBackup5 API wraps response: {"success":1, "data":{...}, "system":{...}}
+    if isinstance(data, dict) and "data" in data:
+        return data["data"]
     return data
 
 

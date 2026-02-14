@@ -86,7 +86,7 @@ class TestIsJobRunning(unittest.TestCase):
     @patch("jetbackup_remote.jetbackup_api.ssh_execute")
     def test_running_string_true(self, mock_exec):
         data = json.loads(_load_fixture("get_backup_job_idle.json"))
-        data["running"] = "True"
+        data["data"]["running"] = "True"
         mock_exec.return_value = SSHResult(
             stdout=json.dumps(data), stderr="", returncode=0,
         )

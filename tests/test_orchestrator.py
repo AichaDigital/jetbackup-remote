@@ -638,7 +638,7 @@ class TestVerifyJobOutcome(unittest.TestCase):
     @patch("jetbackup_remote.orchestrator.list_queue_groups")
     def test_completed_status(self, mock_list):
         mock_list.return_value = [
-            {"_id": "qg1", "status": 100, "job_id": "job1"},
+            {"_id": "qg1", "status": 100, "data": {"_id": "job1", "name": "Test"}},
         ]
         config = _make_config()
         orch = Orchestrator(config)
@@ -653,7 +653,7 @@ class TestVerifyJobOutcome(unittest.TestCase):
     @patch("jetbackup_remote.orchestrator.list_queue_groups")
     def test_partial_fetches_logs(self, mock_list, mock_get):
         mock_list.return_value = [
-            {"_id": "qg1", "status": 102, "job_id": "job1"},
+            {"_id": "qg1", "status": 102, "data": {"_id": "job1", "name": "Test"}},
         ]
         mock_get.return_value = {
             "_id": "qg1", "status": 102, "log_contents": "Partial: 3/5",

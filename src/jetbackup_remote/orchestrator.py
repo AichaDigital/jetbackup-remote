@@ -460,8 +460,10 @@ class Orchestrator:
             return None
 
         # Find the most recent completed group for this job
+        # Queue group stores job info in "data._id" (not top-level "job_id")
         for group in groups:
-            if group.get("job_id") == job.job_id:
+            group_data = group.get("data", {})
+            if isinstance(group_data, dict) and group_data.get("_id") == job.job_id:
                 return group
 
         return None

@@ -1,0 +1,13 @@
+{
+    "success": 1,
+    "message": "",
+    "data": {
+        "_id": "qg_completed",
+        "type": 1,
+        "status": 100,
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "progress": 100,
+        "created": 1707800400,
+        "completed": 1707804000
+    }
+}

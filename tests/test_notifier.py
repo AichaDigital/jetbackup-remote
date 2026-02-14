@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 from jetbackup_remote.config import NotificationConfig
-from jetbackup_remote.models import Job, JobRun, JobStatus, RunResult
+from jetbackup_remote.models import Job, JobRun, JobStatus, QueueGroupStatus, RunResult, ServerRun
 from jetbackup_remote.notifier import (
     build_summary_email, send_notification, _format_duration,
 )
@@ -172,6 +172,145 @@ class TestSendNotification(unittest.TestCase):
             self.assertTrue(send_notification(config, result))
             instance.starttls.assert_called_once()
             instance.login.assert_called_once_with("user", "pass")
+
+
+class TestPartialNotification(unittest.TestCase):
+
+    def _make_partial_result(self):
+        result = RunResult()
+        result.started_at = 1707800000.0
+        result.finished_at = 1707803600.0
+        j = Job(job_id="job1", server_name="srv1", label="Accounts")
+        jr = JobRun(job=j)
+        jr.status = JobStatus.COMPLETED
+        jr.started_at = 1707800000.0
+        jr.finished_at = 1707803600.0
+        jr.queue_group_id = "qg_partial"
+        jr.queue_group_status = QueueGroupStatus.PARTIAL
+        jr.log_contents = "Partial backup: 3 of 5 accounts completed\nAccount user3: disk quota exceeded"
+        result.add_job_run(jr)
+        return result
+
+    def test_partial_subject_tag(self):
+        result = self._make_partial_result()
+        subject, body = build_summary_email(result)
+        self.assertIn("PARTIAL", subject)
+
+    def test_partial_body_verification_section(self):
+        result = self._make_partial_result()
+        subject, body = build_summary_email(result)
+        self.assertIn("JETBACKUP VERIFICATION", body)
+        self.assertIn("qg_partial", body)
+        self.assertIn("PARTIAL", body)
+
+    def test_partial_body_log_contents(self):
+        result = self._make_partial_result()
+        subject, body = build_summary_email(result)
+        self.assertIn("Partial backup", body)
+        self.assertIn("disk quota exceeded", body)
+
+    def test_on_partial_policy_triggers(self):
+        config = NotificationConfig(
+            enabled=True,
+            to_addresses=["a@b.com"],
+            on_complete=False,
+            on_failure=False,
+            on_timeout=False,
+            on_partial=True,
+        )
+        result = self._make_partial_result()
+
+        with patch("jetbackup_remote.notifier.smtplib.SMTP") as mock_smtp:
+            instance = MagicMock()
+            mock_smtp.return_value = instance
+            self.assertTrue(send_notification(config, result))
+            instance.sendmail.assert_called_once()
+
+    def test_on_partial_disabled_skips(self):
+        config = NotificationConfig(
+            enabled=True,
+            to_addresses=["a@b.com"],
+            on_complete=False,
+            on_failure=False,
+            on_timeout=False,
+            on_partial=False,
+        )
+        result = self._make_partial_result()
+        # Should not trigger (on_partial=False and success=True)
+        sent = send_notification(config, result)
+        self.assertTrue(sent)  # True means "skipped by policy" (not an error)
+
+
+class TestDeactivationErrorNotification(unittest.TestCase):
+
+    def _make_deactivation_error_result(self):
+        result = RunResult()
+        result.started_at = 1707800000.0
+        result.finished_at = 1707803600.0
+
+        j = Job(job_id="job1", server_name="srv1", label="Backup1")
+        jr = JobRun(job=j)
+        jr.status = JobStatus.COMPLETED
+        jr.started_at = 1707800000.0
+        jr.finished_at = 1707803600.0
+        result.add_job_run(jr)
+
+        sr = ServerRun(
+            server_name="srv1",
+            destination_id="dest1",
+            destination_activated=True,
+            deactivation_error="CRITICAL: Failed to disable destination",
+        )
+        result.add_server_run(sr)
+        return result
+
+    def test_critical_subject(self):
+        result = self._make_deactivation_error_result()
+        subject, body = build_summary_email(result)
+        self.assertIn("CRITICAL", subject)
+
+    def test_critical_body_section(self):
+        result = self._make_deactivation_error_result()
+        subject, body = build_summary_email(result)
+        self.assertIn("DESTINATION LIFECYCLE ISSUES", body)
+        self.assertIn("ACTION REQUIRED", body)
+        self.assertIn("Manually disable destination", body)
+
+    def test_critical_always_sends(self):
+        """Deactivation error ALWAYS triggers notification regardless of policy."""
+        config = NotificationConfig(
+            enabled=True,
+            to_addresses=["a@b.com"],
+            on_complete=False,
+            on_failure=False,
+            on_timeout=False,
+            on_partial=False,
+        )
+        result = self._make_deactivation_error_result()
+
+        with patch("jetbackup_remote.notifier.smtplib.SMTP") as mock_smtp:
+            instance = MagicMock()
+            mock_smtp.return_value = instance
+            self.assertTrue(send_notification(config, result))
+            instance.sendmail.assert_called_once()
+
+
+class TestQGStatusInEmail(unittest.TestCase):
+
+    def test_qg_status_column(self):
+        result = RunResult()
+        result.started_at = 1707800000.0
+        result.finished_at = 1707803600.0
+        j = Job(job_id="job1", server_name="srv1", label="Accounts")
+        jr = JobRun(job=j)
+        jr.status = JobStatus.COMPLETED
+        jr.started_at = 1707800000.0
+        jr.finished_at = 1707803600.0
+        jr.queue_group_status = QueueGroupStatus.COMPLETED
+        result.add_job_run(jr)
+        subject, body = build_summary_email(result)
+        self.assertIn("QG Status", body)
+        self.assertIn("COMPLETED", body)
 
 
 if __name__ == "__main__":

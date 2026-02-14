@@ -1,0 +1,14 @@
+[
+    {
+        "_id": "qi1",
+        "group_id": "qg_completed",
+        "account": "user1",
+        "status": 100
+    },
+    {
+        "_id": "qi2",
+        "group_id": "qg_completed",
+        "account": "user2",
+        "status": 100
+    }
+]

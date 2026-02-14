@@ -1,0 +1,13 @@
+{
+    "success": 1,
+    "message": "",
+    "data": {
+        "_id": "log1",
+        "type": 1,
+        "status": 100,
+        "created": 1707800400,
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "items_total": 5,
+        "items_completed": 5
+    }
+}

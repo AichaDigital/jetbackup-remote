@@ -14,6 +14,14 @@ class ConfigError(Exception):
 
 
 @dataclass
+class DestinationConfig:
+    """Destination lifecycle settings."""
+    force_activate: bool = False
+    skip_if_disabled: bool = True
+    alert_days_without_jobs: int = 3
+
+
+@dataclass
 class NotificationConfig:
     """Email notification settings."""
     enabled: bool = False
@@ -27,6 +35,7 @@ class NotificationConfig:
     on_failure: bool = True
     on_timeout: bool = True
     on_complete: bool = False
+    on_partial: bool = True
 
 
 @dataclass
@@ -48,6 +57,7 @@ class Config:
     jobs: list = field(default_factory=list)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     notification: NotificationConfig = field(default_factory=NotificationConfig)
+    destination: DestinationConfig = field(default_factory=DestinationConfig)
     ssh_key: Optional[str] = None
 
     @property
@@ -76,6 +86,7 @@ def _parse_server(name: str, data: dict) -> Server:
         user=data.get("user", "root"),
         ssh_key=data.get("ssh_key"),
         ssh_timeout=data.get("ssh_timeout", 30),
+        destination_id=data.get("destination_id"),
     )
 
 
@@ -115,6 +126,7 @@ def _parse_notification(data: dict) -> NotificationConfig:
         on_failure=data.get("on_failure", True),
         on_timeout=data.get("on_timeout", True),
         on_complete=data.get("on_complete", False),
+        on_partial=data.get("on_partial", True),
     )
 
 
@@ -128,6 +140,15 @@ def _parse_orchestrator(data: dict) -> OrchestratorConfig:
         log_file=data.get("log_file", "/var/log/jetbackup-remote.log"),
         log_max_bytes=data.get("log_max_bytes", 10485760),
         log_backup_count=data.get("log_backup_count", 5),
+    )
+
+
+def _parse_destination(data: dict) -> DestinationConfig:
+    """Parse destination lifecycle config."""
+    return DestinationConfig(
+        force_activate=data.get("force_activate", False),
+        skip_if_disabled=data.get("skip_if_disabled", True),
+        alert_days_without_jobs=data.get("alert_days_without_jobs", 3),
     )
 
 
@@ -176,6 +197,7 @@ def load_config(path: str) -> Config:
     # Parse optional sections
     orchestrator = _parse_orchestrator(raw.get("orchestrator", {}))
     notification = _parse_notification(raw.get("notification", {}))
+    destination = _parse_destination(raw.get("destination", {}))
     ssh_key = raw.get("ssh_key")
 
     return Config(
@@ -183,6 +205,7 @@ def load_config(path: str) -> Config:
         jobs=jobs,
         orchestrator=orchestrator,
         notification=notification,
+        destination=destination,
         ssh_key=ssh_key,
     )
 
@@ -213,5 +236,26 @@ def validate_config(config: Config) -> list:
         if job.job_id in seen_ids:
             warnings.append(f"Duplicate job_id: {job.job_id}")
         seen_ids.add(job.job_id)
+
+    # Check for missing destination_id
+    servers_with_jobs = {j.server_name for j in config.jobs}
+    for name in servers_with_jobs:
+        server = config.servers.get(name)
+        if server and not server.destination_id:
+            warnings.append(
+                f"Server '{name}' has no destination_id configured "
+                f"(destination lifecycle management disabled)"
+            )
+
+    # Check for duplicate destination_ids
+    seen_dest_ids = {}
+    for name, server in config.servers.items():
+        if server.destination_id:
+            if server.destination_id in seen_dest_ids:
+                warnings.append(
+                    f"Duplicate destination_id '{server.destination_id}' "
+                    f"on servers '{seen_dest_ids[server.destination_id]}' and '{name}'"
+                )
+            seen_dest_ids[server.destination_id] = name
 
     return warnings

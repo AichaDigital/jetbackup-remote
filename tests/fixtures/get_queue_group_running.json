@@ -1,0 +1,12 @@
+{
+    "success": 1,
+    "message": "",
+    "data": {
+        "_id": "qg_running",
+        "type": 1,
+        "status": 2,
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "progress": 45,
+        "created": 1707800400
+    }
+}

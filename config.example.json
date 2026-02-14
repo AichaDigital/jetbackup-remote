@@ -5,22 +5,26 @@
         "server1": {
             "host": "server1.example.com",
             "port": 51514,
-            "user": "root"
+            "user": "root",
+            "destination_id": "aabbccddeeff00112233aabb"
         },
         "server2": {
             "host": "server2.example.com",
             "port": 51514,
-            "user": "root"
+            "user": "root",
+            "destination_id": "aabbccddeeff00112233aabb"
         },
         "server3": {
             "host": "server3.example.com",
             "port": 51514,
-            "user": "root"
+            "user": "root",
+            "destination_id": "aabbccddeeff00112233aabb"
         },
         "server4": {
             "host": "server4.example.com",
             "port": 51514,
-            "user": "root"
+            "user": "root",
+            "destination_id": "aabbccddeeff00112233aabb"
         }
     },
 
@@ -93,6 +97,12 @@
         "log_backup_count": 5
     },
 
+    "destination": {
+        "force_activate": false,
+        "skip_if_disabled": true,
+        "alert_days_without_jobs": 3
+    },
+
     "notification": {
         "enabled": false,
         "smtp_host": "localhost",
@@ -101,6 +111,7 @@
         "to_addresses": ["admin@example.com"],
         "on_failure": true,
         "on_timeout": true,
-        "on_complete": false
+        "on_complete": false,
+        "on_partial": true
     }
 }

@@ -17,6 +17,105 @@ class JetBackupAPIError(Exception):
     pass
 
 
+def _api_call(
+    server: Server,
+    function: str,
+    params: Optional[dict] = None,
+    ssh_key: Optional[str] = None,
+    expect_data: bool = True,
+) -> dict:
+    """Execute a JetBackup5 API call via SSH.
+
+    Encapsulates: build command → ssh_execute → check success → json.loads → unwrap envelope.
+
+    Args:
+        server: Target server.
+        function: JetBackup API function name (e.g., 'getBackupJob').
+        params: Dict of -D parameters (key=value).
+        ssh_key: SSH key override.
+        expect_data: If True, unwrap the 'data' key from response.
+
+    Returns:
+        Parsed response data (dict or list).
+
+    Raises:
+        JetBackupAPIError: If the API call fails at any level.
+    """
+    # Build command
+    parts = [JETBACKUP_CMD, "-F", function]
+    if params:
+        for key, value in params.items():
+            parts.append(f'-D "{key}={value}"')
+    parts.append("-O json")
+    cmd = " ".join(parts)
+
+    # Execute via SSH
+    try:
+        result = ssh_execute(server, cmd, ssh_key=ssh_key)
+    except SSHError as e:
+        raise JetBackupAPIError(f"SSH failed for {function} on {server.name}: {e}")
+
+    if not result.success:
+        raise JetBackupAPIError(
+            f"{function} failed on {server.name} (rc={result.returncode}): {result.stderr}"
+        )
+
+    # Parse JSON
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise JetBackupAPIError(
+            f"Invalid JSON from {function} on {server.name}: {result.stdout[:200]}"
+        )
+
+    # Unwrap envelope: {"success":1, "data":{...}, "system":{...}}
+    if expect_data and isinstance(data, dict) and "data" in data:
+        return data["data"]
+    return data
+
+
+def _api_call_no_json(
+    server: Server,
+    function: str,
+    params: Optional[dict] = None,
+    ssh_key: Optional[str] = None,
+) -> bool:
+    """Execute a JetBackup5 API call that returns no JSON (action commands).
+
+    Args:
+        server: Target server.
+        function: JetBackup API function name.
+        params: Dict of -D parameters.
+        ssh_key: SSH key override.
+
+    Returns:
+        True if command succeeded (rc=0).
+
+    Raises:
+        JetBackupAPIError: If the call fails.
+    """
+    parts = [JETBACKUP_CMD, "-F", function]
+    if params:
+        for key, value in params.items():
+            parts.append(f'-D "{key}={value}"')
+    cmd = " ".join(parts)
+
+    try:
+        result = ssh_execute(server, cmd, ssh_key=ssh_key)
+    except SSHError as e:
+        raise JetBackupAPIError(f"SSH failed for {function} on {server.name}: {e}")
+
+    if not result.success:
+        raise JetBackupAPIError(
+            f"{function} failed on {server.name} (rc={result.returncode}): {result.stderr}"
+        )
+
+    return True
+
+
+# --- Backup Job functions ---
+
+
 def get_job_status(
     server: Server,
     job_id: str,
@@ -35,29 +134,7 @@ def get_job_status(
     Raises:
         JetBackupAPIError: If the API call fails.
     """
-    cmd = f'{JETBACKUP_CMD} -F getBackupJob -D "_id={job_id}" -O json'
-
-    try:
-        result = ssh_execute(server, cmd, ssh_key=ssh_key)
-    except SSHError as e:
-        raise JetBackupAPIError(f"SSH failed for getBackupJob on {server.name}: {e}")
-
-    if not result.success:
-        raise JetBackupAPIError(
-            f"getBackupJob failed on {server.name} (rc={result.returncode}): {result.stderr}"
-        )
-
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        raise JetBackupAPIError(
-            f"Invalid JSON from getBackupJob on {server.name}: {result.stdout[:200]}"
-        )
-
-    # JetBackup5 API wraps response: {"success":1, "data":{...}, "system":{...}}
-    if isinstance(data, dict) and "data" in data:
-        return data["data"]
-    return data
+    return _api_call(server, "getBackupJob", {"_id": job_id}, ssh_key=ssh_key)
 
 
 def is_job_running(
@@ -102,20 +179,38 @@ def run_job(
     Raises:
         JetBackupAPIError: If the API call fails.
     """
-    cmd = f'{JETBACKUP_CMD} -F runBackupJobManually -D "_id={job_id}"'
-
-    try:
-        result = ssh_execute(server, cmd, ssh_key=ssh_key)
-    except SSHError as e:
-        raise JetBackupAPIError(f"SSH failed for runBackupJobManually on {server.name}: {e}")
-
-    if not result.success:
-        raise JetBackupAPIError(
-            f"runBackupJobManually failed on {server.name} (rc={result.returncode}): {result.stderr}"
-        )
-
+    result = _api_call_no_json(server, "runBackupJobManually", {"_id": job_id}, ssh_key=ssh_key)
     logger.info("Triggered job %s on %s", job_id, server.name)
-    return True
+    return result
+
+
+def set_job_enabled(
+    server: Server,
+    job_id: str,
+    enabled: bool,
+    ssh_key: Optional[str] = None,
+) -> bool:
+    """Enable or disable a backup job.
+
+    Args:
+        server: Target server.
+        job_id: The backup job ID.
+        enabled: True to enable, False to disable.
+        ssh_key: SSH key override.
+
+    Returns:
+        True if the operation succeeded.
+
+    Raises:
+        JetBackupAPIError: If the API call fails.
+    """
+    value = "1" if enabled else "0"
+    result = _api_call_no_json(
+        server, "editBackupJob", {"_id": job_id, "enabled": value}, ssh_key=ssh_key,
+    )
+    action = "Enabled" if enabled else "Disabled"
+    logger.info("%s job %s on %s", action, job_id, server.name)
+    return result
 
 
 def list_jobs(
@@ -134,30 +229,92 @@ def list_jobs(
     Raises:
         JetBackupAPIError: If the API call fails.
     """
-    cmd = f"{JETBACKUP_CMD} -F listBackupJobs -O json"
-
-    try:
-        result = ssh_execute(server, cmd, ssh_key=ssh_key)
-    except SSHError as e:
-        raise JetBackupAPIError(f"SSH failed for listBackupJobs on {server.name}: {e}")
-
-    if not result.success:
-        raise JetBackupAPIError(
-            f"listBackupJobs failed on {server.name} (rc={result.returncode}): {result.stderr}"
-        )
-
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        raise JetBackupAPIError(
-            f"Invalid JSON from listBackupJobs on {server.name}: {result.stdout[:200]}"
-        )
+    data = _api_call(server, "listBackupJobs", ssh_key=ssh_key, expect_data=False)
 
     if isinstance(data, list):
         return data
     if isinstance(data, dict) and "data" in data:
         return data["data"]
     return [data]
+
+
+# --- Destination functions ---
+
+
+def get_destination(
+    server: Server,
+    dest_id: str,
+    ssh_key: Optional[str] = None,
+) -> dict:
+    """Get destination details.
+
+    Args:
+        server: Target server.
+        dest_id: Destination ID.
+        ssh_key: SSH key override.
+
+    Returns:
+        Dict with destination data including 'disabled' field.
+
+    Raises:
+        JetBackupAPIError: If the API call fails.
+    """
+    return _api_call(server, "getDestination", {"_id": dest_id}, ssh_key=ssh_key)
+
+
+def is_destination_disabled(
+    server: Server,
+    dest_id: str,
+    ssh_key: Optional[str] = None,
+) -> bool:
+    """Check if a destination is disabled.
+
+    Args:
+        server: Target server.
+        dest_id: Destination ID.
+        ssh_key: SSH key override.
+
+    Returns:
+        True if the destination is disabled.
+    """
+    data = get_destination(server, dest_id, ssh_key)
+    disabled = data.get("disabled", False)
+    if isinstance(disabled, str):
+        return disabled.lower() in ("true", "1", "yes")
+    return bool(disabled)
+
+
+def set_destination_state(
+    server: Server,
+    dest_id: str,
+    disabled: bool,
+    ssh_key: Optional[str] = None,
+) -> bool:
+    """Enable or disable a destination.
+
+    Args:
+        server: Target server.
+        dest_id: Destination ID.
+        disabled: True to disable, False to enable.
+        ssh_key: SSH key override.
+
+    Returns:
+        True if the operation succeeded.
+
+    Raises:
+        JetBackupAPIError: If the API call fails.
+    """
+    value = "1" if disabled else "0"
+    result = _api_call_no_json(
+        server, "manageDestinationState", {"_id": dest_id, "disabled": value},
+        ssh_key=ssh_key,
+    )
+    action = "Disabled" if disabled else "Enabled"
+    logger.info("%s destination %s on %s", action, dest_id, server.name)
+    return result
+
+
+# --- Queue functions ---
 
 
 def list_queue_groups(
@@ -176,24 +333,63 @@ def list_queue_groups(
     Raises:
         JetBackupAPIError: If the API call fails.
     """
-    cmd = f'{JETBACKUP_CMD} -F listQueueGroups -D "type=1" -O json'
+    data = _api_call(server, "listQueueGroups", {"type": "1"}, ssh_key=ssh_key, expect_data=False)
 
-    try:
-        result = ssh_execute(server, cmd, ssh_key=ssh_key)
-    except SSHError as e:
-        raise JetBackupAPIError(f"SSH failed for listQueueGroups on {server.name}: {e}")
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and "data" in data:
+        return data["data"]
+    return [data]
 
-    if not result.success:
-        raise JetBackupAPIError(
-            f"listQueueGroups failed on {server.name} (rc={result.returncode}): {result.stderr}"
-        )
 
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        raise JetBackupAPIError(
-            f"Invalid JSON from listQueueGroups on {server.name}: {result.stdout[:200]}"
-        )
+def get_queue_group(
+    server: Server,
+    group_id: str,
+    get_log_contents: bool = False,
+    ssh_key: Optional[str] = None,
+) -> dict:
+    """Get queue group details with optional log contents.
+
+    Args:
+        server: Target server.
+        group_id: Queue group ID.
+        get_log_contents: Include log contents in response.
+        ssh_key: SSH key override.
+
+    Returns:
+        Dict with queue group data including 'status'.
+
+    Raises:
+        JetBackupAPIError: If the API call fails.
+    """
+    params = {"_id": group_id}
+    if get_log_contents:
+        params["get_log_contents"] = "1"
+    return _api_call(server, "getQueueGroup", params, ssh_key=ssh_key)
+
+
+def list_queue_items(
+    server: Server,
+    group_id: str,
+    ssh_key: Optional[str] = None,
+) -> list:
+    """List items within a queue group.
+
+    Args:
+        server: Target server.
+        group_id: Queue group ID.
+        ssh_key: SSH key override.
+
+    Returns:
+        List of queue item dicts.
+
+    Raises:
+        JetBackupAPIError: If the API call fails.
+    """
+    data = _api_call(
+        server, "listQueueItems", {"group_id": group_id},
+        ssh_key=ssh_key, expect_data=False,
+    )
 
     if isinstance(data, list):
         return data
@@ -217,20 +413,139 @@ def stop_queue_group(
     Returns:
         True if stopped successfully.
     """
-    cmd = f'{JETBACKUP_CMD} -F stopQueueGroup -D "_id={group_id}"'
-
-    try:
-        result = ssh_execute(server, cmd, ssh_key=ssh_key)
-    except SSHError as e:
-        raise JetBackupAPIError(f"SSH failed for stopQueueGroup on {server.name}: {e}")
-
-    if not result.success:
-        raise JetBackupAPIError(
-            f"stopQueueGroup failed on {server.name} (rc={result.returncode}): {result.stderr}"
-        )
-
+    result = _api_call_no_json(server, "stopQueueGroup", {"_id": group_id}, ssh_key=ssh_key)
     logger.info("Stopped queue group %s on %s", group_id, server.name)
-    return True
+    return result
+
+
+def clear_queue(
+    server: Server,
+    group_id: str,
+    ssh_key: Optional[str] = None,
+) -> bool:
+    """Clear a finished queue group.
+
+    Args:
+        server: Target server.
+        group_id: Queue group ID to clear.
+        ssh_key: SSH key override.
+
+    Returns:
+        True if cleared successfully.
+    """
+    result = _api_call_no_json(server, "clearQueue", {"_id": group_id}, ssh_key=ssh_key)
+    logger.info("Cleared queue group %s on %s", group_id, server.name)
+    return result
+
+
+# --- Log functions ---
+
+
+def list_logs(
+    server: Server,
+    log_type: Optional[str] = None,
+    limit: int = 10,
+    ssh_key: Optional[str] = None,
+) -> list:
+    """List recent logs.
+
+    Args:
+        server: Target server.
+        log_type: Filter by log type.
+        limit: Maximum number of logs.
+        ssh_key: SSH key override.
+
+    Returns:
+        List of log dicts.
+
+    Raises:
+        JetBackupAPIError: If the API call fails.
+    """
+    params = {"limit": str(limit)}
+    if log_type:
+        params["type"] = log_type
+    data = _api_call(server, "listLogs", params, ssh_key=ssh_key, expect_data=False)
+
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and "data" in data:
+        return data["data"]
+    return [data]
+
+
+def get_log(
+    server: Server,
+    log_id: str,
+    ssh_key: Optional[str] = None,
+) -> dict:
+    """Get log details.
+
+    Args:
+        server: Target server.
+        log_id: Log ID.
+        ssh_key: SSH key override.
+
+    Returns:
+        Dict with log data.
+
+    Raises:
+        JetBackupAPIError: If the API call fails.
+    """
+    return _api_call(server, "getLog", {"_id": log_id}, ssh_key=ssh_key)
+
+
+def list_log_items(
+    server: Server,
+    log_id: str,
+    ssh_key: Optional[str] = None,
+) -> list:
+    """List items within a log.
+
+    Args:
+        server: Target server.
+        log_id: Log ID.
+        ssh_key: SSH key override.
+
+    Returns:
+        List of log item dicts.
+
+    Raises:
+        JetBackupAPIError: If the API call fails.
+    """
+    data = _api_call(
+        server, "listLogItems", {"_id": log_id},
+        ssh_key=ssh_key, expect_data=False,
+    )
+
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and "data" in data:
+        return data["data"]
+    return [data]
+
+
+def get_log_item(
+    server: Server,
+    item_id: str,
+    ssh_key: Optional[str] = None,
+) -> dict:
+    """Get log item details.
+
+    Args:
+        server: Target server.
+        item_id: Log item ID.
+        ssh_key: SSH key override.
+
+    Returns:
+        Dict with log item data.
+
+    Raises:
+        JetBackupAPIError: If the API call fails.
+    """
+    return _api_call(server, "getLogItem", {"_id": item_id}, ssh_key=ssh_key)
+
+
+# --- Connectivity test ---
 
 
 def test_connection(

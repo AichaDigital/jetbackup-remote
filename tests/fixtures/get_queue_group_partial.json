@@ -1,0 +1,14 @@
+{
+    "success": 1,
+    "message": "",
+    "data": {
+        "_id": "qg_partial",
+        "type": 1,
+        "status": 102,
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "progress": 100,
+        "created": 1707800400,
+        "completed": 1707804000,
+        "log_contents": "Partial backup: 3 of 5 accounts completed\nAccount user3: disk quota exceeded\nAccount user5: connection timeout"
+    }
+}

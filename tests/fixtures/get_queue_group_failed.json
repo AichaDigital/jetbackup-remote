@@ -1,0 +1,14 @@
+{
+    "success": 1,
+    "message": "",
+    "data": {
+        "_id": "qg_failed",
+        "type": 1,
+        "status": 200,
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "progress": 10,
+        "created": 1707800400,
+        "completed": 1707801000,
+        "log_contents": "Fatal: destination unreachable\nError: Connection to NAS timed out"
+    }
+}

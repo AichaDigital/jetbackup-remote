@@ -20,6 +20,36 @@ class QueueGroupStatus(IntEnum):
     """JetBackup queue group status codes."""
     RUNNING = 2
     COMPLETED = 100
+    WARNINGS = 101
+    PARTIAL = 102
+    FAILED = 200
+    ABORTED = 201
+
+    @property
+    def is_finished(self) -> bool:
+        """True if the queue group is no longer running."""
+        return self != QueueGroupStatus.RUNNING
+
+    @property
+    def is_success(self) -> bool:
+        """True if completed without errors (success or warnings)."""
+        return self in (QueueGroupStatus.COMPLETED, QueueGroupStatus.WARNINGS)
+
+    @property
+    def is_problematic(self) -> bool:
+        """True if partial, failed, or aborted."""
+        return self in (
+            QueueGroupStatus.PARTIAL,
+            QueueGroupStatus.FAILED,
+            QueueGroupStatus.ABORTED,
+        )
+
+
+class DestinationState(Enum):
+    """State of a JetBackup destination."""
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    UNKNOWN = "unknown"
 
 
 class JobType(Enum):
@@ -39,6 +69,7 @@ class Server:
     user: str = "root"
     ssh_key: Optional[str] = None
     ssh_timeout: int = 30
+    destination_id: Optional[str] = None
 
     def ssh_target(self) -> str:
         """Return user@host string."""
@@ -68,6 +99,11 @@ class JobRun:
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
     error_message: Optional[str] = None
+    # Verification fields (populated post-completion)
+    queue_group_id: Optional[str] = None
+    queue_group_status: Optional[QueueGroupStatus] = None
+    log_id: Optional[str] = None
+    log_contents: Optional[str] = None
 
     def start(self) -> None:
         """Mark job as running."""
@@ -119,11 +155,42 @@ class JobRun:
             return f"{minutes}m {secs}s"
         return f"{secs}s"
 
+    @property
+    def is_verified_problematic(self) -> bool:
+        """True if post-completion verification found issues."""
+        if self.queue_group_status is None:
+            return False
+        return self.queue_group_status.is_problematic
+
+
+@dataclass
+class ServerRun:
+    """State of processing a single server during a run."""
+    server_name: str
+    destination_id: Optional[str] = None
+    destination_activated: bool = False
+    destination_deactivated: bool = False
+    activation_error: Optional[str] = None
+    deactivation_error: Optional[str] = None
+    job_runs: list = field(default_factory=list)
+    orphan_queue_groups_killed: int = 0
+
+    @property
+    def has_lifecycle_error(self) -> bool:
+        """True if destination activation or deactivation failed."""
+        return self.activation_error is not None or self.deactivation_error is not None
+
+    @property
+    def has_deactivation_error(self) -> bool:
+        """True if destination deactivation failed (CRITICAL)."""
+        return self.deactivation_error is not None
+
 
 @dataclass
 class RunResult:
     """Summary of a complete orchestration run."""
     jobs: list = field(default_factory=list)
+    server_runs: list = field(default_factory=list)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
     dry_run: bool = False
@@ -139,6 +206,10 @@ class RunResult:
     def add_job_run(self, job_run: JobRun) -> None:
         """Add a job run to the result."""
         self.jobs.append(job_run)
+
+    def add_server_run(self, server_run: ServerRun) -> None:
+        """Add a server run to the result."""
+        self.server_runs.append(server_run)
 
     @property
     def total(self) -> int:
@@ -161,9 +232,22 @@ class RunResult:
         return sum(1 for j in self.jobs if j.status == JobStatus.SKIPPED)
 
     @property
+    def partial_jobs(self) -> int:
+        """Count of jobs with PARTIAL queue group status."""
+        return sum(
+            1 for j in self.jobs
+            if j.queue_group_status == QueueGroupStatus.PARTIAL
+        )
+
+    @property
     def success(self) -> bool:
         """True if all jobs completed without failure."""
         return self.failed == 0 and self.timed_out == 0
+
+    @property
+    def has_deactivation_errors(self) -> bool:
+        """True if any server had destination deactivation failure."""
+        return any(sr.has_deactivation_error for sr in self.server_runs)
 
     @property
     def duration_seconds(self) -> Optional[float]:
@@ -183,4 +267,6 @@ class RunResult:
             parts.append(f"TIMEOUT: {self.timed_out}")
         if self.skipped:
             parts.append(f"SKIPPED: {self.skipped}")
+        if self.partial_jobs:
+            parts.append(f"PARTIAL: {self.partial_jobs}")
         return " | ".join(parts)

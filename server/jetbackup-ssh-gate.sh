@@ -25,11 +25,27 @@ fi
 
 # Whitelist of allowed commands (exact prefix match)
 ALLOWED_PATTERNS=(
+    # Backup job functions
     'jetbackup5api -F getBackupJob '
     'jetbackup5api -F runBackupJobManually '
+    'jetbackup5api -F editBackupJob '
     'jetbackup5api -F listBackupJobs'
+    # Destination functions
+    'jetbackup5api -F manageDestinationState '
+    'jetbackup5api -F getDestination '
+    'jetbackup5api -F listDestinations'
+    # Queue functions
     'jetbackup5api -F listQueueGroups '
+    'jetbackup5api -F getQueueGroup '
+    'jetbackup5api -F listQueueItems '
     'jetbackup5api -F stopQueueGroup '
+    'jetbackup5api -F clearQueue '
+    # Log functions
+    'jetbackup5api -F listLogs '
+    'jetbackup5api -F getLog '
+    'jetbackup5api -F listLogItems '
+    'jetbackup5api -F getLogItem '
+    # Connectivity test
     'echo '
 )
 

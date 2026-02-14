@@ -1,0 +1,16 @@
+[
+    {
+        "_id": "log1",
+        "type": 1,
+        "status": 100,
+        "created": 1707800400,
+        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+        "_id": "log2",
+        "type": 1,
+        "status": 200,
+        "created": 1707714000,
+        "job_id": "bbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+]

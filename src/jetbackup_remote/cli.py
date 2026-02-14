@@ -8,7 +8,14 @@ from typing import Optional
 
 from . import __version__
 from .config import ConfigError, load_config, validate_config
-from .jetbackup_api import test_connection, list_jobs as api_list_jobs, stop_queue_group
+from .jetbackup_api import (
+    JetBackupAPIError,
+    get_destination,
+    is_destination_disabled,
+    test_connection,
+    list_jobs as api_list_jobs,
+    stop_queue_group,
+)
 from .logging_config import setup_logging
 from .models import JobStatus
 from .notifier import send_notification
@@ -54,10 +61,15 @@ def cmd_run(args) -> int:
 
     try:
         orch.install_signal_handlers()
+
+        # Determine force_activate from CLI flag
+        force_activate = getattr(args, "force_activate_destination", False) or None
+
         result = orch.run(
             dry_run=args.dry_run,
             server_filter=getattr(args, "server", None),
             job_filter=getattr(args, "job", None),
+            force_activate=force_activate,
         )
 
         # Send notification
@@ -74,6 +86,13 @@ def cmd_run(args) -> int:
                         f"on {jr.job.server_name}"
                         f"{' - ' + jr.error_message if jr.error_message else ''}",
                     )
+
+        # Show deactivation errors prominently
+        if result.has_deactivation_errors:
+            print("\nCRITICAL: Destination deactivation failed!")
+            for sr in result.server_runs:
+                if sr.has_deactivation_error:
+                    print(f"  {sr.server_name}: {sr.deactivation_error}")
 
         return 0 if result.success else 2
 
@@ -100,10 +119,22 @@ def cmd_status(args) -> int:
             "ssh_ok": conn["ssh_ok"],
             "jetbackup_ok": conn["jetbackup_ok"],
             "error": conn.get("error"),
+            "destination_id": server.destination_id,
+            "destination_disabled": None,
             "jobs": [],
         }
 
         if conn["jetbackup_ok"]:
+            # Check destination state
+            if server.destination_id:
+                try:
+                    disabled = is_destination_disabled(
+                        server, server.destination_id, ssh_key=config.ssh_key,
+                    )
+                    results[name]["destination_disabled"] = disabled
+                except Exception:
+                    results[name]["destination_disabled"] = None
+
             from .jetbackup_api import is_job_running
             for job in server_jobs:
                 try:
@@ -126,7 +157,15 @@ def cmd_status(args) -> int:
         for name, data in results.items():
             ssh_icon = "OK" if data["ssh_ok"] else "FAIL"
             jb_icon = "OK" if data["jetbackup_ok"] else "FAIL"
-            print(f"{name}: SSH={ssh_icon} JB5={jb_icon}")
+            dest_status = ""
+            if data["destination_id"]:
+                if data["destination_disabled"] is True:
+                    dest_status = " DEST=DISABLED"
+                elif data["destination_disabled"] is False:
+                    dest_status = " DEST=ENABLED"
+                else:
+                    dest_status = " DEST=UNKNOWN"
+            print(f"{name}: SSH={ssh_icon} JB5={jb_icon}{dest_status}")
             if data["error"]:
                 print(f"  Error: {data['error']}")
             for job in data["jobs"]:
@@ -222,6 +261,8 @@ def cmd_validate(args) -> int:
     print(f"Notifications: {'enabled' if config.notification.enabled else 'disabled'}")
     print(f"Poll interval: {config.orchestrator.poll_interval}s")
     print(f"Job timeout: {config.orchestrator.job_timeout}s")
+    print(f"Destination lifecycle: force_activate={config.destination.force_activate}, "
+          f"skip_if_disabled={config.destination.skip_if_disabled}")
 
     if warnings:
         print(f"\nWarnings ({len(warnings)}):")
@@ -230,6 +271,73 @@ def cmd_validate(args) -> int:
         return 1
 
     print("\nConfig is valid.")
+    return 0
+
+
+def cmd_destinations(args) -> int:
+    """Show destination status on all servers."""
+    config = _load_and_validate_config(args)
+    if config is None:
+        return 1
+
+    results = {}
+    for name, server in config.servers.items():
+        if args.server and name != args.server:
+            continue
+
+        if not server.destination_id:
+            results[name] = {
+                "destination_id": None,
+                "status": "not configured",
+            }
+            continue
+
+        conn = test_connection(server, ssh_key=config.ssh_key)
+        if not conn["jetbackup_ok"]:
+            results[name] = {
+                "destination_id": server.destination_id,
+                "status": "unreachable",
+                "error": conn.get("error"),
+            }
+            continue
+
+        try:
+            dest_data = get_destination(
+                server, server.destination_id, ssh_key=config.ssh_key,
+            )
+            disabled = dest_data.get("disabled", False)
+            if isinstance(disabled, str):
+                disabled = disabled.lower() in ("true", "1", "yes")
+
+            results[name] = {
+                "destination_id": server.destination_id,
+                "status": "disabled" if disabled else "enabled",
+                "name": dest_data.get("name", ""),
+                "disk_usage": dest_data.get("disk_usage"),
+            }
+        except Exception as e:
+            results[name] = {
+                "destination_id": server.destination_id,
+                "status": "error",
+                "error": str(e),
+            }
+
+    if getattr(args, "json", False):
+        print(json.dumps(results, indent=2))
+    else:
+        for name, data in results.items():
+            if data["destination_id"] is None:
+                print(f"{name}: no destination_id configured")
+            else:
+                status = data["status"].upper()
+                dest_name = data.get("name", "")
+                extra = f" ({dest_name})" if dest_name else ""
+                print(f"{name}: {status}{extra} [id={data['destination_id']}]")
+                if data.get("error"):
+                    print(f"  Error: {data['error']}")
+                if data.get("disk_usage") is not None:
+                    print(f"  Disk usage: {data['disk_usage']}")
+
     return 0
 
 
@@ -261,6 +369,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--dry-run", action="store_true", help="Simulate without triggering")
     p_run.add_argument("--server", help="Only run jobs for this server")
     p_run.add_argument("--job", help="Only run this specific job ID")
+    p_run.add_argument(
+        "--force-activate-destination",
+        action="store_true",
+        dest="force_activate_destination",
+        help="Force activate destination even if disabled (overrides skip_if_disabled)",
+    )
 
     # status
     p_status = subparsers.add_parser("status", help="Show job status on servers")
@@ -283,6 +397,11 @@ def build_parser() -> argparse.ArgumentParser:
     # validate
     subparsers.add_parser("validate", help="Validate configuration")
 
+    # destinations
+    p_dest = subparsers.add_parser("destinations", help="Show destination status")
+    p_dest.add_argument("--server", help="Only show this server")
+    p_dest.add_argument("--json", action="store_true", help="JSON output")
+
     return parser
 
 
@@ -298,6 +417,7 @@ def main(argv=None) -> int:
         "list": cmd_list,
         "stop": cmd_stop,
         "validate": cmd_validate,
+        "destinations": cmd_destinations,
     }
 
     handler = commands.get(args.command)

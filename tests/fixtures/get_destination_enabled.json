@@ -1,0 +1,11 @@
+{
+    "success": 1,
+    "message": "",
+    "data": {
+        "_id": "dest1",
+        "name": "RASP NAS",
+        "type": 1,
+        "disabled": false,
+        "disk_usage": "1.2 TB"
+    }
+}

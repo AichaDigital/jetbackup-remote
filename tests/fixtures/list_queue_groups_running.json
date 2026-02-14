@@ -1,10 +1,16 @@
-[
-    {
-        "_id": "abc123",
-        "type": 1,
-        "status": 2,
-        "job_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
-        "progress": 45,
-        "created": 1707800400
+{
+    "success": 1,
+    "data": {
+        "groups": [
+            {
+                "_id": "abc123",
+                "type": 1,
+                "status": 2,
+                "job_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+                "progress": 45,
+                "created": 1707800400
+            }
+        ],
+        "total": 1
     }
-]
+}

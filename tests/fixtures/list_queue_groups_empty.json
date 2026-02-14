@@ -1,1 +1,7 @@
-[]
+{
+    "success": 1,
+    "data": {
+        "groups": [],
+        "total": 0
+    }
+}

@@ -333,13 +333,14 @@ def list_queue_groups(
     Raises:
         JetBackupAPIError: If the API call fails.
     """
-    data = _api_call(server, "listQueueGroups", {"type": "1"}, ssh_key=ssh_key, expect_data=False)
+    data = _api_call(server, "listQueueGroups", {"type": "1"}, ssh_key=ssh_key)
 
+    # data is {"groups": [...], "total": N} after envelope unwrap
+    if isinstance(data, dict):
+        return data.get("groups", [])
     if isinstance(data, list):
         return data
-    if isinstance(data, dict) and "data" in data:
-        return data["data"]
-    return [data]
+    return []
 
 
 def get_queue_group(
@@ -388,14 +389,15 @@ def list_queue_items(
     """
     data = _api_call(
         server, "listQueueItems", {"group_id": group_id},
-        ssh_key=ssh_key, expect_data=False,
+        ssh_key=ssh_key,
     )
 
+    # data is {"items": [...], "total": N} after envelope unwrap
+    if isinstance(data, dict):
+        return data.get("items", [])
     if isinstance(data, list):
         return data
-    if isinstance(data, dict) and "data" in data:
-        return data["data"]
-    return [data]
+    return []
 
 
 def stop_queue_group(
@@ -464,13 +466,14 @@ def list_logs(
     params = {"limit": str(limit)}
     if log_type:
         params["type"] = log_type
-    data = _api_call(server, "listLogs", params, ssh_key=ssh_key, expect_data=False)
+    data = _api_call(server, "listLogs", params, ssh_key=ssh_key)
 
+    # data is {"logs": [...], "total": N} after envelope unwrap
+    if isinstance(data, dict):
+        return data.get("logs", [])
     if isinstance(data, list):
         return data
-    if isinstance(data, dict) and "data" in data:
-        return data["data"]
-    return [data]
+    return []
 
 
 def get_log(
@@ -514,14 +517,15 @@ def list_log_items(
     """
     data = _api_call(
         server, "listLogItems", {"_id": log_id},
-        ssh_key=ssh_key, expect_data=False,
+        ssh_key=ssh_key,
     )
 
+    # data is {"items": [...], "total": N} after envelope unwrap
+    if isinstance(data, dict):
+        return data.get("items", [])
     if isinstance(data, list):
         return data
-    if isinstance(data, dict) and "data" in data:
-        return data["data"]
-    return [data]
+    return []
 
 
 def get_log_item(

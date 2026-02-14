@@ -1,16 +1,22 @@
-[
-    {
-        "_id": "li1",
-        "log_id": "log1",
-        "account": "user1",
-        "status": 100,
-        "size": 1073741824
-    },
-    {
-        "_id": "li2",
-        "log_id": "log1",
-        "account": "user2",
-        "status": 100,
-        "size": 536870912
+{
+    "success": 1,
+    "data": {
+        "items": [
+            {
+                "_id": "li1",
+                "log_id": "log1",
+                "account": "user1",
+                "status": 100,
+                "size": 1073741824
+            },
+            {
+                "_id": "li2",
+                "log_id": "log1",
+                "account": "user2",
+                "status": 100,
+                "size": 536870912
+            }
+        ],
+        "total": 2
     }
-]
+}

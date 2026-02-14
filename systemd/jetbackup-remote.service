@@ -6,6 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+Environment=PYTHONPATH=/opt/jetbackup-remote/src
 ExecStart=/usr/bin/python3 -m jetbackup_remote -c /etc/jetbackup-remote/config.json run
 User=root
 Group=root
@@ -15,12 +16,11 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=jetbackup-remote
 
-# Security hardening
+# Security hardening (ProtectHome disabled: needs /root/.ssh for SSH keys)
 ProtectSystem=strict
 ReadWritePaths=/var/log /tmp /etc/jetbackup-remote
 PrivateTmp=true
 NoNewPrivileges=true
-ProtectHome=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
 

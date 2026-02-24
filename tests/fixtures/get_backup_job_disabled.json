@@ -6,7 +6,7 @@
         "name": "Accounts Backup",
         "type": 1,
         "running": false,
-        "enabled": false,
+        "disabled": 1,
         "destination": [
             "dest1"
         ],

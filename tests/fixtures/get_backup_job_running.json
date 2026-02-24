@@ -6,7 +6,7 @@
         "name": "Accounts Backup",
         "type": 1,
         "running": true,
-        "enabled": true,
+        "disabled": 0,
         "destination": ["dest1"],
         "last_run": "2026-02-14T02:00:00+00:00",
         "last_completed": "2026-02-13T01:30:00+00:00"

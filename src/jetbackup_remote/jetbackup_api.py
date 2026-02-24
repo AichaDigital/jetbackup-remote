@@ -204,9 +204,9 @@ def set_job_enabled(
     Raises:
         JetBackupAPIError: If the API call fails.
     """
-    value = "1" if enabled else "0"
+    value = "0" if enabled else "1"
     result = _api_call_no_json(
-        server, "editBackupJob", {"_id": job_id, "enabled": value}, ssh_key=ssh_key,
+        server, "editBackupJob", {"_id": job_id, "disabled": value}, ssh_key=ssh_key,
     )
     action = "Enabled" if enabled else "Disabled"
     logger.info("%s job %s on %s", action, job_id, server.name)

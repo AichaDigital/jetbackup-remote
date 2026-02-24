@@ -28,7 +28,7 @@ ALLOWED_PATTERNS=(
     # Backup job functions
     'jetbackup5api -F getBackupJob '
     'jetbackup5api -F runBackupJobManually '
-    'jetbackup5api -F editBackupJob '
+    'jetbackup5api -F manageBackupJob '
     'jetbackup5api -F listBackupJobs'
     # Destination functions
     'jetbackup5api -F manageDestinationState '

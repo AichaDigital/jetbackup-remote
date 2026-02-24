@@ -211,7 +211,8 @@ class TestSetJobEnabled(unittest.TestCase):
         result = set_job_enabled(_make_server(), "abc", enabled=True)
         self.assertTrue(result)
         cmd = mock_exec.call_args[0][1]
-        self.assertIn("editBackupJob", cmd)
+        self.assertIn("manageBackupJob", cmd)
+        self.assertIn("action=modify", cmd)
         self.assertIn("disabled=0", cmd)
 
     @patch("jetbackup_remote.jetbackup_api.ssh_execute")

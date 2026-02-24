@@ -41,11 +41,11 @@ def _api_call(
     Raises:
         JetBackupAPIError: If the API call fails at any level.
     """
-    # Build command
+    # Build command with &-separated params (JetBackup5 canonical format)
     parts = [JETBACKUP_CMD, "-F", function]
     if params:
-        for key, value in params.items():
-            parts.append(f'-D "{key}={value}"')
+        param_str = "&".join(f"{key}={value}" for key, value in params.items())
+        parts.append(f'-D "{param_str}"')
     parts.append("-O json")
     cmd = " ".join(parts)
 
@@ -94,10 +94,11 @@ def _api_call_no_json(
     Raises:
         JetBackupAPIError: If the call fails.
     """
+    # Build command with &-separated params (JetBackup5 canonical format)
     parts = [JETBACKUP_CMD, "-F", function]
     if params:
-        for key, value in params.items():
-            parts.append(f'-D "{key}={value}"')
+        param_str = "&".join(f"{key}={value}" for key, value in params.items())
+        parts.append(f'-D "{param_str}"')
     cmd = " ".join(parts)
 
     try:
@@ -206,7 +207,9 @@ def set_job_enabled(
     """
     value = "0" if enabled else "1"
     result = _api_call_no_json(
-        server, "editBackupJob", {"_id": job_id, "disabled": value}, ssh_key=ssh_key,
+        server, "manageBackupJob",
+        {"_id": job_id, "action": "modify", "disabled": value},
+        ssh_key=ssh_key,
     )
     action = "Enabled" if enabled else "Disabled"
     logger.info("%s job %s on %s", action, job_id, server.name)

@@ -127,3 +127,11 @@ PYTHONPATH=src python3 -m unittest discover -s tests
 | Queue groups | `listQueueGroups` | `type=1` (backups) |
 
 **Formato de parámetros:** siempre `&`-separated en un solo `-D`: `-D "_id=xxx&action=modify&disabled=0"`
+
+### 2026-03-03 — Timeout debe abortar, nunca "pasar al siguiente"
+
+**Contexto:** orchestrator.py — `_poll_completion_only`, producción con 4 servidores
+**Problema:** 4 backups concurrentes saturaron el controlador USB del NAS (JMicron JMS567). El orquestador, diseñado para max 1 backup activo, permitió 4 simultáneos.
+**Causa raíz:** Cuando un job excedía `job_timeout`, el orquestador marcaba TIMEOUT pero NO abortaba el backup — simplemente pasaba al siguiente servidor. El backup original seguía corriendo. Con 4 servidores, se acumularon 4 backups concurrentes. `Persistent=true` en systemd timer agravaba el problema encadenando runs.
+**Solución:** Al exceder timeout, abortar el backup via `stopQueueGroup` (status=ABORTED=201), esperar confirmación de parada (hasta 60s), y entonces continuar. Timer systemd cambiado a `Persistent=false`. Añadido `_global_preflight_check` que verifica TODOS los servidores antes de iniciar.
+**Regla derivada:** FIFO inviolable. Si un job está atascado, abortarlo limpiamente via `stopQueueGroup` en vez de proceder al siguiente. Nunca debe haber 2 backups escribiendo al NAS simultáneamente.

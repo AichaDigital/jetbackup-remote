@@ -42,7 +42,7 @@ class NotificationConfig:
 class OrchestratorConfig:
     """Orchestrator behavior settings."""
     poll_interval: int = 30
-    job_timeout: int = 14400  # 4 hours
+    job_timeout: int = 28800  # 8 hours
     startup_timeout: int = 120  # 2 min to wait for job to start after trigger
     lock_file: str = "/tmp/jetbackup-remote.lock"
     log_file: str = "/var/log/jetbackup-remote.log"
@@ -130,11 +130,26 @@ def _parse_notification(data: dict) -> NotificationConfig:
     )
 
 
+MIN_JOB_TIMEOUT = 1800    # 30 minutes
+MAX_JOB_TIMEOUT = 86400   # 24 hours
+
+
 def _parse_orchestrator(data: dict) -> OrchestratorConfig:
     """Parse orchestrator config."""
+    job_timeout = data.get("job_timeout", 28800)
+
+    if job_timeout > MAX_JOB_TIMEOUT:
+        raise ConfigError(
+            f"job_timeout ({job_timeout}s) exceeds maximum ({MAX_JOB_TIMEOUT}s / 24h)"
+        )
+    if job_timeout < MIN_JOB_TIMEOUT:
+        raise ConfigError(
+            f"job_timeout ({job_timeout}s) below minimum ({MIN_JOB_TIMEOUT}s / 30min)"
+        )
+
     return OrchestratorConfig(
         poll_interval=data.get("poll_interval", 30),
-        job_timeout=data.get("job_timeout", 14400),
+        job_timeout=job_timeout,
         startup_timeout=data.get("startup_timeout", 120),
         lock_file=data.get("lock_file", "/tmp/jetbackup-remote.lock"),
         log_file=data.get("log_file", "/var/log/jetbackup-remote.log"),
@@ -246,6 +261,13 @@ def validate_config(config: Config) -> list:
                 f"Server '{name}' has no destination_id configured "
                 f"(destination lifecycle management disabled)"
             )
+
+    # Check job_timeout is reasonable
+    if config.orchestrator.job_timeout < 7200:
+        warnings.append(
+            f"job_timeout ({config.orchestrator.job_timeout}s) is less than 2 hours, "
+            f"may be insufficient for large backups"
+        )
 
     # Check for duplicate destination_ids
     seen_dest_ids = {}

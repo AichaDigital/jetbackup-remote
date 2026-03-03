@@ -173,10 +173,9 @@ class TestExecuteJob(unittest.TestCase):
         """Trigger → startup wait sees running=True → poll sees running=False."""
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
         mock_run.return_value = True
-        # 1: not running (check) → trigger
-        # 2: running (startup wait) → started
-        # 3: not running (completion poll) → done
-        mock_is_running.side_effect = [False, True, False]
+        # Preflight: False (job1 on srv1), False (job1 on srv2 — no jobs but server exists)
+        # Execution: not running (check) → trigger → running (startup) → not running (done)
+        mock_is_running.side_effect = [False, False, True, False]
 
         config = _make_config(jobs=[
             Job(job_id="job1", server_name="srv1", label="Backup1"),
@@ -196,9 +195,9 @@ class TestExecuteJob(unittest.TestCase):
     def test_job_already_running(self, mock_test, mock_run, mock_is_running, mock_set_enabled, mock_list_qg):
         """Already running → skip trigger and startup, go to completion poll."""
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
-        # 1: already running (check) → skip trigger
-        # 2: not running (completion poll) → done
-        mock_is_running.side_effect = [True, False]
+        # Preflight: False (job1 on srv1 — not running during preflight)
+        # Execution: already running (check) → skip trigger → not running (done)
+        mock_is_running.side_effect = [False, True, False]
 
         config = _make_config(jobs=[
             Job(job_id="job1", server_name="srv1", label="Backup1"),
@@ -209,8 +208,10 @@ class TestExecuteJob(unittest.TestCase):
         self.assertEqual(result.completed, 1)
         mock_run.assert_not_called()  # Should not trigger if already running
 
+    @patch("jetbackup_remote.orchestrator.list_queue_groups", return_value=[])
+    @patch("jetbackup_remote.orchestrator.is_job_running", return_value=False)
     @patch("jetbackup_remote.orchestrator.test_connection")
-    def test_ssh_unreachable_skips(self, mock_test):
+    def test_ssh_unreachable_skips(self, mock_test, mock_is_running, mock_list_qg):
         mock_test.return_value = {
             "ssh_ok": False, "jetbackup_ok": False,
             "error": "Connection refused",
@@ -232,7 +233,8 @@ class TestExecuteJob(unittest.TestCase):
     @patch("jetbackup_remote.orchestrator.test_connection")
     def test_trigger_failure(self, mock_test, mock_run, mock_is_running, mock_set_enabled, mock_list_qg):
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
-        mock_is_running.return_value = False
+        # Preflight: False, then execution: False (check) → trigger fails
+        mock_is_running.side_effect = [False, False]
         mock_run.side_effect = JetBackupAPIError("API error")
 
         config = _make_config(jobs=[
@@ -244,19 +246,40 @@ class TestExecuteJob(unittest.TestCase):
         self.assertEqual(result.total, 1)
         self.assertEqual(result.failed, 1)
 
-    @patch("jetbackup_remote.orchestrator.list_queue_groups", return_value=[])
+    @patch("jetbackup_remote.orchestrator.stop_queue_group")
+    @patch("jetbackup_remote.orchestrator.list_queue_groups")
     @patch("jetbackup_remote.orchestrator.set_job_enabled", return_value=True)
     @patch("jetbackup_remote.orchestrator.is_job_running")
     @patch("jetbackup_remote.orchestrator.run_job")
     @patch("jetbackup_remote.orchestrator.test_connection")
-    def test_timeout_does_not_abort(self, mock_test, mock_run, mock_is_running, mock_set_enabled, mock_list_qg):
-        """Job starts but never finishes → timeout without aborting."""
+    def test_timeout_aborts_job(self, mock_test, mock_run, mock_is_running,
+                                mock_set_enabled, mock_list_qg, mock_stop):
+        """Job starts but never finishes → timeout triggers abort via stopQueueGroup."""
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
         mock_run.return_value = True
-        # 1: not running (check) → trigger
-        # 2: running (startup) → started
-        # 3+: always running → eventually times out
-        mock_is_running.side_effect = [False, True] + [True] * 200
+        # list_queue_groups calls:
+        # 1. preflight srv1 → empty
+        # 2. preflight srv2 → empty
+        # 3. abort: _find_running_queue_group_for_job → running group
+        mock_list_qg.side_effect = [
+            [],       # preflight srv1
+            [],       # preflight srv2
+            [{"_id": "qg1", "status": 2, "data": {"_id": "job1"}}],  # abort lookup
+        ]
+        # is_job_running calls:
+        # 1. preflight: job1 on srv1 → False
+        # 2. execution: initial check → False (trigger)
+        # 3. execution: startup → True (started)
+        # 4-N. execution: completion poll → True (timeout)
+        # N+1. abort: confirmation → False (stopped)
+        mock_is_running.side_effect = [
+            False,    # preflight
+            False,    # initial check
+            True,     # startup
+        ] + [True] * 50 + [
+            False,    # abort confirmation
+        ]
+        mock_stop.return_value = True
 
         config = _make_config(jobs=[
             Job(job_id="job1", server_name="srv1", label="Backup1"),
@@ -265,12 +288,18 @@ class TestExecuteJob(unittest.TestCase):
         config.orchestrator.poll_interval = 0.01
 
         orch = Orchestrator(config)
+        orch.ABORT_WAIT_TIMEOUT = 2
+        orch.ABORT_POLL_INTERVAL = 0.01
         result = orch.run()
 
         self.assertEqual(result.total, 1)
         self.assertEqual(result.timed_out, 1)
-        # Job was NOT stopped/aborted
         self.assertFalse(result.success)
+        # stop_queue_group was called to abort
+        mock_stop.assert_called()
+        # Verify the timeout error message reflects abort
+        job_run = result.jobs[0]
+        self.assertIn("aborted", job_run.error_message)
 
     @patch("jetbackup_remote.orchestrator.list_queue_groups", return_value=[])
     @patch("jetbackup_remote.orchestrator.set_job_enabled", return_value=True)
@@ -281,8 +310,7 @@ class TestExecuteJob(unittest.TestCase):
         """Job triggered but never starts within startup_timeout → fail."""
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
         mock_run.return_value = True
-        # 1: not running (check) → trigger
-        # 2+: never starts (always False) → startup timeout
+        # All False: preflight check + execution check + startup polls
         mock_is_running.return_value = False
 
         config = _make_config(jobs=[
@@ -307,11 +335,13 @@ class TestExecuteJob(unittest.TestCase):
         """All 3 jobs run sequentially: check→trigger→startup→complete each."""
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
         mock_run.return_value = True
-        # Each job: False (check) → True (startup) → False (complete)
+        # Preflight: False for each managed job (job1, job2 on srv1 + job3 on srv2)
+        # Execution: each job: False (check) → True (startup) → False (complete)
         mock_is_running.side_effect = [
-            False, True, False,  # job1
-            False, True, False,  # job2
-            False, True, False,  # job3
+            False, False, False,  # preflight: job1, job2 on srv1 + job3 on srv2
+            False, True, False,   # job1
+            False, True, False,   # job2
+            False, True, False,   # job3
         ]
 
         config = _make_config()
@@ -333,8 +363,9 @@ class TestShutdown(unittest.TestCase):
     def test_shutdown_skips_remaining(self, mock_test, mock_run, mock_is_running, mock_set_enabled, mock_list_qg):
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
         mock_run.return_value = True
+        # Preflight: False for all 3 jobs
         # First job: False (check) → True (startup) → False (complete)
-        mock_is_running.side_effect = [False, True, False]
+        mock_is_running.side_effect = [False, False, False, False, True, False]
 
         config = _make_config()
         orch = Orchestrator(config)
@@ -374,15 +405,15 @@ class TestPollErrors(unittest.TestCase):
         """SSH error during completion poll is retried."""
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
         mock_run.return_value = True
-        # 1: not running (check) → trigger
-        # 2: running (startup) → started
-        # 3: error (completion poll) → retry
-        # 4: not running (completion poll) → done
+        # Preflight: False (job1)
+        # Execution: not running (check) → trigger → running (startup) →
+        # error (poll retry) → not running (done)
         mock_is_running.side_effect = [
-            False,
-            True,
-            SSHError("temporary failure"),
-            False,
+            False,  # preflight
+            False,  # check
+            True,   # startup
+            SSHError("temporary failure"),  # poll error
+            False,  # poll done
         ]
 
         config = _make_config(jobs=[
@@ -403,15 +434,15 @@ class TestPollErrors(unittest.TestCase):
         """SSH error during startup wait is retried."""
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
         mock_run.return_value = True
-        # 1: not running (check) → trigger
-        # 2: error (startup) → retry
-        # 3: running (startup) → started
-        # 4: not running (completion) → done
+        # Preflight: False (job1)
+        # Execution: not running (check) → trigger → error (startup retry) →
+        # running (startup) → not running (done)
         mock_is_running.side_effect = [
-            False,
-            SSHError("temporary failure"),
-            True,
-            False,
+            False,  # preflight
+            False,  # check
+            SSHError("temporary failure"),  # startup error
+            True,   # startup ok
+            False,  # completion
         ]
 
         config = _make_config(jobs=[
@@ -429,7 +460,8 @@ class TestPollErrors(unittest.TestCase):
     @patch("jetbackup_remote.orchestrator.test_connection")
     def test_status_check_failure(self, mock_test, mock_is_running, mock_set_enabled, mock_list_qg):
         mock_test.return_value = {"ssh_ok": True, "jetbackup_ok": True, "error": None}
-        mock_is_running.side_effect = JetBackupAPIError("API error")
+        # Preflight: False (job1), then execution check: API error
+        mock_is_running.side_effect = [False, JetBackupAPIError("API error")]
 
         config = _make_config(jobs=[
             Job(job_id="job1", server_name="srv1", label="Backup1"),
@@ -771,6 +803,219 @@ class TestProcessServer(unittest.TestCase):
         self.assertEqual(len(sr.job_runs), 1)
         self.assertEqual(sr.job_runs[0].status, JobStatus.SKIPPED)
         self.assertIn("disabled", sr.job_runs[0].error_message)
+
+
+class TestFindRunningQueueGroup(unittest.TestCase):
+
+    @patch("jetbackup_remote.orchestrator.list_queue_groups")
+    def test_finds_running_group(self, mock_list):
+        mock_list.return_value = [
+            {"_id": "qg1", "status": 2, "data": {"_id": "job1", "name": "Test"}},
+        ]
+        config = _make_config()
+        orch = Orchestrator(config)
+        server = config.servers["srv1"]
+        job = config.jobs[0]
+        group = orch._find_running_queue_group_for_job(server, job)
+        self.assertIsNotNone(group)
+        self.assertEqual(group["_id"], "qg1")
+
+    @patch("jetbackup_remote.orchestrator.list_queue_groups")
+    def test_ignores_completed_groups(self, mock_list):
+        mock_list.return_value = [
+            {"_id": "qg1", "status": 100, "data": {"_id": "job1", "name": "Test"}},
+        ]
+        config = _make_config()
+        orch = Orchestrator(config)
+        server = config.servers["srv1"]
+        job = config.jobs[0]
+        group = orch._find_running_queue_group_for_job(server, job)
+        self.assertIsNone(group)
+
+    @patch("jetbackup_remote.orchestrator.list_queue_groups")
+    def test_ignores_different_job(self, mock_list):
+        mock_list.return_value = [
+            {"_id": "qg1", "status": 2, "data": {"_id": "other_job", "name": "Other"}},
+        ]
+        config = _make_config()
+        orch = Orchestrator(config)
+        server = config.servers["srv1"]
+        job = config.jobs[0]
+        group = orch._find_running_queue_group_for_job(server, job)
+        self.assertIsNone(group)
+
+    @patch("jetbackup_remote.orchestrator.list_queue_groups")
+    def test_api_error_returns_none(self, mock_list):
+        mock_list.side_effect = JetBackupAPIError("error")
+        config = _make_config()
+        orch = Orchestrator(config)
+        server = config.servers["srv1"]
+        job = config.jobs[0]
+        group = orch._find_running_queue_group_for_job(server, job)
+        self.assertIsNone(group)
+
+
+class TestAbortRunningJob(unittest.TestCase):
+
+    @patch("jetbackup_remote.orchestrator.is_job_running")
+    @patch("jetbackup_remote.orchestrator.stop_queue_group")
+    @patch("jetbackup_remote.orchestrator.list_queue_groups")
+    def test_abort_success(self, mock_list, mock_stop, mock_running):
+        """Abort finds queue group, stops it, confirms job stopped."""
+        mock_list.return_value = [
+            {"_id": "qg1", "status": 2, "data": {"_id": "job1"}},
+        ]
+        mock_stop.return_value = True
+        mock_running.return_value = False  # Job confirmed stopped
+
+        config = _make_config()
+        orch = Orchestrator(config)
+        orch.ABORT_WAIT_TIMEOUT = 0.5
+        orch.ABORT_POLL_INTERVAL = 0.1
+        server = config.servers["srv1"]
+        job = config.jobs[0]
+        jr = JobRun(job=job)
+
+        result = orch._abort_running_job(server, job, jr)
+
+        self.assertTrue(result)
+        mock_stop.assert_called_once()
+
+    @patch("jetbackup_remote.orchestrator.is_job_running")
+    @patch("jetbackup_remote.orchestrator.list_queue_groups")
+    def test_abort_no_queue_group_but_job_stops(self, mock_list, mock_running):
+        """No running queue group found, but job stops on its own."""
+        mock_list.return_value = []
+        mock_running.return_value = False
+
+        config = _make_config()
+        orch = Orchestrator(config)
+        orch.ABORT_WAIT_TIMEOUT = 0.5
+        orch.ABORT_POLL_INTERVAL = 0.1
+        server = config.servers["srv1"]
+        job = config.jobs[0]
+        jr = JobRun(job=job)
+
+        result = orch._abort_running_job(server, job, jr)
+        self.assertTrue(result)
+
+    @patch("jetbackup_remote.orchestrator.is_job_running")
+    @patch("jetbackup_remote.orchestrator.stop_queue_group")
+    @patch("jetbackup_remote.orchestrator.list_queue_groups")
+    def test_abort_stop_fails(self, mock_list, mock_stop, mock_running):
+        """stop_queue_group raises error → returns False without blocking."""
+        mock_list.return_value = [
+            {"_id": "qg1", "status": 2, "data": {"_id": "job1"}},
+        ]
+        mock_stop.side_effect = JetBackupAPIError("API error")
+
+        config = _make_config()
+        orch = Orchestrator(config)
+        orch.ABORT_WAIT_TIMEOUT = 0.5
+        orch.ABORT_POLL_INTERVAL = 0.1
+        server = config.servers["srv1"]
+        job = config.jobs[0]
+        jr = JobRun(job=job)
+
+        result = orch._abort_running_job(server, job, jr)
+        self.assertFalse(result)
+
+    @patch("jetbackup_remote.orchestrator.is_job_running")
+    @patch("jetbackup_remote.orchestrator.stop_queue_group")
+    @patch("jetbackup_remote.orchestrator.list_queue_groups")
+    def test_abort_timeout_still_running(self, mock_list, mock_stop, mock_running):
+        """Job never stops within ABORT_WAIT_TIMEOUT → returns False."""
+        mock_list.return_value = [
+            {"_id": "qg1", "status": 2, "data": {"_id": "job1"}},
+        ]
+        mock_stop.return_value = True
+        mock_running.return_value = True  # Never stops
+
+        config = _make_config()
+        orch = Orchestrator(config)
+        orch.ABORT_WAIT_TIMEOUT = 0.2
+        orch.ABORT_POLL_INTERVAL = 0.05
+        server = config.servers["srv1"]
+        job = config.jobs[0]
+        jr = JobRun(job=job)
+
+        result = orch._abort_running_job(server, job, jr)
+        self.assertFalse(result)
+
+
+class TestGlobalPreflightCheck(unittest.TestCase):
+
+    @patch("jetbackup_remote.orchestrator.is_job_running")
+    @patch("jetbackup_remote.orchestrator.list_queue_groups")
+    def test_clean_servers(self, mock_list, mock_running):
+        """No running backups → preflight passes."""
+        mock_list.return_value = []
+        mock_running.return_value = False
+
+        config = _make_config()
+        orch = Orchestrator(config)
+        result = orch._global_preflight_check()
+        self.assertTrue(result)
+
+    @patch("jetbackup_remote.orchestrator.is_job_running")
+    @patch("jetbackup_remote.orchestrator.stop_queue_group")
+    @patch("jetbackup_remote.orchestrator.list_queue_groups")
+    def test_running_groups_stopped(self, mock_list, mock_stop, mock_running):
+        """Running queue groups found and successfully stopped → passes."""
+        mock_list.return_value = [
+            {"_id": "qg1", "status": 2},
+        ]
+        mock_stop.return_value = True
+        mock_running.return_value = False
+
+        config = _make_config()
+        orch = Orchestrator(config)
+        result = orch._global_preflight_check()
+        self.assertTrue(result)
+        mock_stop.assert_called()
+
+    @patch("jetbackup_remote.orchestrator.is_job_running")
+    @patch("jetbackup_remote.orchestrator.list_queue_groups")
+    def test_managed_job_still_running(self, mock_list, mock_running):
+        """A managed job is still running → preflight fails."""
+        mock_list.return_value = []
+        # srv1 has job1, job2 → first True, rest False
+        # srv2 has job3 → False
+        mock_running.side_effect = [True, False, False]
+
+        config = _make_config()
+        orch = Orchestrator(config)
+        result = orch._global_preflight_check()
+        self.assertFalse(result)
+
+    @patch("jetbackup_remote.orchestrator.is_job_running")
+    @patch("jetbackup_remote.orchestrator.list_queue_groups")
+    def test_unreachable_server_skipped(self, mock_list, mock_running):
+        """Server unreachable during preflight → skipped, not treated as failure."""
+        mock_list.side_effect = SSHError("Connection refused")
+
+        config = _make_config()
+        orch = Orchestrator(config)
+        result = orch._global_preflight_check()
+        # Unreachable servers are skipped, not failure
+        self.assertTrue(result)
+        mock_running.assert_not_called()
+
+    @patch("jetbackup_remote.orchestrator.is_job_running")
+    @patch("jetbackup_remote.orchestrator.stop_queue_group")
+    @patch("jetbackup_remote.orchestrator.list_queue_groups")
+    def test_stop_fails_returns_false(self, mock_list, mock_stop, mock_running):
+        """stop_queue_group fails → preflight fails."""
+        mock_list.return_value = [
+            {"_id": "qg1", "status": 2},
+        ]
+        mock_stop.side_effect = JetBackupAPIError("API error")
+        mock_running.return_value = False
+
+        config = _make_config()
+        orch = Orchestrator(config)
+        result = orch._global_preflight_check()
+        self.assertFalse(result)
 
 
 if __name__ == "__main__":

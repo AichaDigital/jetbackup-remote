@@ -40,6 +40,9 @@ class LockError(Exception):
 class Orchestrator:
     """Server-grouped job executor with destination lifecycle management."""
 
+    ABORT_WAIT_TIMEOUT = 60    # seconds to wait for job to stop after abort
+    ABORT_POLL_INTERVAL = 5    # seconds between abort confirmation polls
+
     def __init__(self, config: Config):
         self.config = config
         self._lock_fd: Optional[int] = None
@@ -211,7 +214,7 @@ class Orchestrator:
     ) -> None:
         """Poll until running=False or timeout. Used when job is known to be running.
 
-        Does NOT abort the job on timeout (would corrupt backup).
+        On timeout, aborts the job via stopQueueGroup to preserve FIFO invariant.
         """
         poll_interval = self.config.orchestrator.poll_interval
         timeout = self.config.orchestrator.job_timeout
@@ -230,9 +233,10 @@ class Orchestrator:
             if elapsed >= timeout:
                 logger.warning(
                     "Job %s on %s exceeded timeout (%ds). "
-                    "NOT aborting (would corrupt backup). Moving to next job.",
+                    "Aborting via stopQueueGroup to preserve FIFO invariant.",
                     job.display_name, server.name, timeout,
                 )
+                self._abort_running_job(server, job, job_run)
                 job_run.timeout()
                 return
 
@@ -274,7 +278,7 @@ class Orchestrator:
         Phase 1 (startup): After trigger, wait until running=True is observed.
         Phase 2 (completion): Once running, wait until running=False.
 
-        Does NOT abort the job on timeout (would corrupt backup).
+        On timeout, aborts the job via stopQueueGroup to preserve FIFO invariant.
         """
         # Phase 1: wait for job to actually start
         started = self._wait_for_startup(server, job)
@@ -468,6 +472,101 @@ class Orchestrator:
 
         return None
 
+    def _find_running_queue_group_for_job(
+        self,
+        server: Server,
+        job: Job,
+    ) -> Optional[dict]:
+        """Find a RUNNING queue group for this job.
+
+        Similar to _find_queue_group_for_job but filters only status=RUNNING.
+        Used to identify which queue group to abort on timeout.
+
+        Returns:
+            Queue group dict or None.
+        """
+        try:
+            groups = list_queue_groups(server, ssh_key=self.config.ssh_key)
+        except (JetBackupAPIError, SSHError) as e:
+            logger.warning(
+                "Failed to list queue groups for abort on %s: %s",
+                server.name, e,
+            )
+            return None
+
+        for group in groups:
+            if group.get("status") != QueueGroupStatus.RUNNING:
+                continue
+            group_data = group.get("data", {})
+            if isinstance(group_data, dict) and group_data.get("_id") == job.job_id:
+                return group
+
+        return None
+
+    def _abort_running_job(
+        self,
+        server: Server,
+        job: Job,
+        job_run: JobRun,
+    ) -> bool:
+        """Abort a running job via stopQueueGroup to preserve FIFO invariant.
+
+        1. Find the running queue group for this job
+        2. Call stop_queue_group to abort it
+        3. Poll until is_job_running() returns False (up to ABORT_WAIT_TIMEOUT)
+
+        Returns:
+            True if job was confirmed stopped, False otherwise.
+        """
+        group = self._find_running_queue_group_for_job(server, job)
+
+        if group:
+            group_id = group.get("_id", "unknown")
+            logger.warning(
+                "Aborting queue group %s for job %s on %s",
+                group_id, job.display_name, server.name,
+            )
+            try:
+                stop_queue_group(server, group_id, ssh_key=self.config.ssh_key)
+            except (JetBackupAPIError, SSHError) as e:
+                logger.critical(
+                    "Failed to abort queue group %s for job %s on %s: %s",
+                    group_id, job.display_name, server.name, e,
+                )
+                return False
+        else:
+            logger.warning(
+                "No running queue group found for job %s on %s, "
+                "checking if job is still running...",
+                job.display_name, server.name,
+            )
+
+        # Poll until job is confirmed stopped
+        start_time = time.time()
+        while time.time() - start_time < self.ABORT_WAIT_TIMEOUT:
+            try:
+                if not is_job_running(
+                    server, job.job_id, ssh_key=self.config.ssh_key,
+                ):
+                    logger.info(
+                        "Job %s on %s confirmed stopped after abort",
+                        job.display_name, server.name,
+                    )
+                    return True
+            except (JetBackupAPIError, SSHError) as e:
+                logger.warning(
+                    "Error checking job status during abort for %s on %s: %s",
+                    job.display_name, server.name, e,
+                )
+            time.sleep(self.ABORT_POLL_INTERVAL)
+
+        logger.critical(
+            "Job %s on %s still running after %ds abort wait. "
+            "FIFO invariant may be violated.",
+            job.display_name, server.name, self.ABORT_WAIT_TIMEOUT,
+        )
+        return False
+
     def _verify_job_outcome(
         self,
         server: Server,
@@ -568,6 +667,72 @@ class Orchestrator:
             return foreign_ids
 
         return []
+
+    # --- Global preflight ---
+
+    def _global_preflight_check(self) -> bool:
+        """Verify no backups are running on ANY managed server before starting.
+
+        Scans all configured servers for running queue groups and managed jobs.
+        Attempts to stop any found running groups. If any job cannot be confirmed
+        stopped, returns False to abort the run.
+
+        Returns:
+            True if all clear, False if active backups prevent safe execution.
+        """
+        all_clean = True
+
+        for server_name, server in self.config.servers.items():
+            # Check queue groups
+            try:
+                groups = list_queue_groups(server, ssh_key=self.config.ssh_key)
+            except (JetBackupAPIError, SSHError) as e:
+                logger.warning(
+                    "Preflight: cannot check queue on %s: %s (skipping server)",
+                    server_name, e,
+                )
+                continue
+
+            running_groups = [
+                g for g in groups
+                if g.get("status") == QueueGroupStatus.RUNNING
+            ]
+
+            for group in running_groups:
+                group_id = group.get("_id", "unknown")
+                logger.warning(
+                    "Preflight: running queue group %s found on %s, stopping...",
+                    group_id, server_name,
+                )
+                try:
+                    stop_queue_group(server, group_id, ssh_key=self.config.ssh_key)
+                except (JetBackupAPIError, SSHError) as e:
+                    logger.error(
+                        "Preflight: failed to stop queue group %s on %s: %s",
+                        group_id, server_name, e,
+                    )
+                    all_clean = False
+
+            # Check managed jobs
+            managed_jobs = [j for j in self.config.jobs if j.server_name == server_name]
+            for job in managed_jobs:
+                try:
+                    if is_job_running(server, job.job_id, ssh_key=self.config.ssh_key):
+                        logger.error(
+                            "Preflight: managed job %s still running on %s",
+                            job.display_name, server_name,
+                        )
+                        all_clean = False
+                except (JetBackupAPIError, SSHError) as e:
+                    logger.warning(
+                        "Preflight: cannot check job %s on %s: %s (skipping)",
+                        job.display_name, server_name, e,
+                    )
+
+        if not all_clean:
+            logger.error("Preflight check failed: active backups detected")
+
+        return all_clean
 
     # --- Server processing ---
 
@@ -859,6 +1024,13 @@ class Orchestrator:
         )
 
         result.start()
+
+        # Global preflight: ensure no backups are running on any server
+        if not dry_run:
+            if not self._global_preflight_check():
+                logger.error("Active backups detected. Aborting run.")
+                result.finish()
+                return result
 
         # Determine force_activate: CLI override > config
         effective_force = force_activate if force_activate is not None else self.config.destination.force_activate

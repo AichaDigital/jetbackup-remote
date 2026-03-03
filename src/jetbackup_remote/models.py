@@ -122,10 +122,10 @@ class JobRun:
         self.error_message = message
 
     def timeout(self) -> None:
-        """Mark job as timed out (non-aborting)."""
+        """Mark job as timed out (backup aborted via stopQueueGroup)."""
         self.status = JobStatus.TIMEOUT
         self.finished_at = time.time()
-        self.error_message = "Job exceeded timeout limit"
+        self.error_message = "Job exceeded timeout limit and was aborted"
 
     def skip(self, message: str) -> None:
         """Mark job as skipped."""

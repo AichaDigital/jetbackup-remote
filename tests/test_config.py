@@ -255,7 +255,7 @@ class TestOrchestratorConfigDefaults(unittest.TestCase):
     def test_defaults(self):
         cfg = OrchestratorConfig()
         self.assertEqual(cfg.poll_interval, 30)
-        self.assertEqual(cfg.job_timeout, 14400)
+        self.assertEqual(cfg.job_timeout, 28800)
         self.assertEqual(cfg.startup_timeout, 120)
         self.assertEqual(cfg.lock_file, "/tmp/jetbackup-remote.lock")
 
@@ -265,6 +265,65 @@ class TestOrchestratorConfigDefaults(unittest.TestCase):
         self.assertTrue(cfg.on_failure)
         self.assertTrue(cfg.on_timeout)
         self.assertFalse(cfg.on_complete)
+
+
+class TestJobTimeoutValidation(unittest.TestCase):
+
+    def test_timeout_exceeds_maximum(self):
+        data = dict(MINIMAL_CONFIG)
+        data["orchestrator"] = {"job_timeout": 86401}
+        path = _write_config(data)
+        try:
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(path)
+            self.assertIn("exceeds maximum", str(ctx.exception))
+        finally:
+            os.unlink(path)
+
+    def test_timeout_below_minimum(self):
+        data = dict(MINIMAL_CONFIG)
+        data["orchestrator"] = {"job_timeout": 1799}
+        path = _write_config(data)
+        try:
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(path)
+            self.assertIn("below minimum", str(ctx.exception))
+        finally:
+            os.unlink(path)
+
+    def test_timeout_at_maximum_boundary(self):
+        data = dict(MINIMAL_CONFIG)
+        data["orchestrator"] = {"job_timeout": 86400}
+        path = _write_config(data)
+        try:
+            cfg = load_config(path)
+            self.assertEqual(cfg.orchestrator.job_timeout, 86400)
+        finally:
+            os.unlink(path)
+
+    def test_timeout_at_minimum_boundary(self):
+        data = dict(MINIMAL_CONFIG)
+        data["orchestrator"] = {"job_timeout": 1800}
+        path = _write_config(data)
+        try:
+            cfg = load_config(path)
+            self.assertEqual(cfg.orchestrator.job_timeout, 1800)
+        finally:
+            os.unlink(path)
+
+    def test_low_timeout_warning(self):
+        data = dict(MINIMAL_CONFIG)
+        data["orchestrator"] = {"job_timeout": 3600}
+        path = _write_config(data)
+        try:
+            cfg = load_config(path)
+            warnings = validate_config(cfg)
+            self.assertTrue(
+                any("less than 2 hours" in w for w in warnings),
+                f"Expected low timeout warning, got: {warnings}",
+            )
+        finally:
+            os.unlink(path)
 
 
 class TestDestinationConfig(unittest.TestCase):

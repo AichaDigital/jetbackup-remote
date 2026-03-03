@@ -4,11 +4,11 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "jetbackup-remote"
-version = "0.1.0"
+version = "0.2.0"
 description = "Remote orchestrator for JetBackup5 backup serialization"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 authors = [
     {name = "Abdelkarim Mateos", email = "abdelkarim@aichadigital.es"},
 ]
@@ -20,10 +20,9 @@ classifiers = [
     "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: System :: Archiving :: Backup",
 ]
 

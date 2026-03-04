@@ -26,8 +26,10 @@ config.json
 .env
 
 # Claude Code auto-generated
+.claude/
 **/CLAUDE.md
 !CLAUDE.md
+
 
 # OS
 .DS_Store

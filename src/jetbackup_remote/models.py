@@ -84,6 +84,7 @@ class Job:
     label: str = ""
     job_type: JobType = JobType.OTHER
     priority: int = 0
+    timeout: Optional[int] = None  # Per-job timeout override (seconds)
 
     @property
     def display_name(self) -> str:

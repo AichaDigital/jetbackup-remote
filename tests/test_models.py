@@ -306,5 +306,20 @@ class TestRunResultExtended(unittest.TestCase):
         self.assertEqual(s.destination_id, "dest1")
 
 
+class TestJobTimeout(unittest.TestCase):
+
+    def test_timeout_default_none(self):
+        job = Job(job_id="abc", server_name="srv1")
+        self.assertIsNone(job.timeout)
+
+    def test_timeout_custom(self):
+        job = Job(job_id="abc", server_name="srv1", timeout=7200)
+        self.assertEqual(job.timeout, 7200)
+
+    def test_timeout_zero_is_valid(self):
+        job = Job(job_id="abc", server_name="srv1", timeout=0)
+        self.assertEqual(job.timeout, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

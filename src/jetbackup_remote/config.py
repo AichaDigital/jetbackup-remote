@@ -1,6 +1,7 @@
 """Configuration loader and validator for jetbackup-remote."""
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -36,6 +37,7 @@ class NotificationConfig:
     on_timeout: bool = True
     on_complete: bool = False
     on_partial: bool = True
+    on_daemon_lifecycle: bool = True
 
 
 @dataclass
@@ -48,6 +50,14 @@ class OrchestratorConfig:
     log_file: str = "/var/log/jetbackup-remote.log"
     log_max_bytes: int = 10485760  # 10 MB
     log_backup_count: int = 5
+    state_file: str = "/var/lib/jetbackup-remote/last-run.json"
+
+
+@dataclass
+class LoopConfig:
+    """Daemon loop settings."""
+    target_interval: int = 86400   # 24h target between cycle starts
+    min_pause: int = 3600          # 1h minimum pause after cycle
 
 
 @dataclass
@@ -58,6 +68,7 @@ class Config:
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     notification: NotificationConfig = field(default_factory=NotificationConfig)
     destination: DestinationConfig = field(default_factory=DestinationConfig)
+    loop: LoopConfig = field(default_factory=LoopConfig)
     ssh_key: Optional[str] = None
 
     @property
@@ -103,23 +114,39 @@ def _parse_job(data: dict, server_names: set) -> Job:
             f"Job '{data['job_id']}' references unknown server '{server_name}'"
         )
 
+    timeout_val = data.get("timeout")
+    if timeout_val is not None and timeout_val < MIN_JOB_TIMEOUT:
+        raise ConfigError(
+            f"Job '{data['job_id']}' timeout ({timeout_val}s) below minimum ({MIN_JOB_TIMEOUT}s)"
+        )
+
     return Job(
         job_id=data["job_id"],
         server_name=server_name,
         label=data.get("label", ""),
         job_type=_parse_job_type(data.get("type", "other")),
         priority=data.get("priority", 0),
+        timeout=timeout_val,
     )
 
 
 def _parse_notification(data: dict) -> NotificationConfig:
     """Parse notification config."""
+    password = data.get("smtp_password", "")
+    if password.startswith("FROM_ENV:"):
+        env_var = password[len("FROM_ENV:"):]
+        password = os.environ.get(env_var)
+        if password is None:
+            raise ConfigError(
+                f"Environment variable '{env_var}' not set (required by smtp_password FROM_ENV:)"
+            )
+
     return NotificationConfig(
         enabled=data.get("enabled", False),
         smtp_host=data.get("smtp_host", "localhost"),
         smtp_port=data.get("smtp_port", 25),
         smtp_user=data.get("smtp_user", ""),
-        smtp_password=data.get("smtp_password", ""),
+        smtp_password=password,
         smtp_tls=data.get("smtp_tls", False),
         from_address=data.get("from_address", "jetbackup-remote@localhost"),
         to_addresses=data.get("to_addresses", []),
@@ -127,11 +154,12 @@ def _parse_notification(data: dict) -> NotificationConfig:
         on_timeout=data.get("on_timeout", True),
         on_complete=data.get("on_complete", False),
         on_partial=data.get("on_partial", True),
+        on_daemon_lifecycle=data.get("on_daemon_lifecycle", True),
     )
 
 
 MIN_JOB_TIMEOUT = 1800    # 30 minutes
-MAX_JOB_TIMEOUT = 86400   # 24 hours
+MAX_JOB_TIMEOUT = 172800  # 48 hours
 
 
 def _parse_orchestrator(data: dict) -> OrchestratorConfig:
@@ -155,6 +183,7 @@ def _parse_orchestrator(data: dict) -> OrchestratorConfig:
         log_file=data.get("log_file", "/var/log/jetbackup-remote.log"),
         log_max_bytes=data.get("log_max_bytes", 10485760),
         log_backup_count=data.get("log_backup_count", 5),
+        state_file=data.get("state_file", "/var/lib/jetbackup-remote/last-run.json"),
     )
 
 
@@ -165,6 +194,21 @@ def _parse_destination(data: dict) -> DestinationConfig:
         skip_if_disabled=data.get("skip_if_disabled", True),
         alert_days_without_jobs=data.get("alert_days_without_jobs", 3),
     )
+
+
+def _parse_loop(data: dict) -> LoopConfig:
+    """Parse daemon loop config."""
+    target = data.get("target_interval", 86400)
+    min_pause = data.get("min_pause", 3600)
+
+    if target < 3600:
+        raise ConfigError(f"loop.target_interval ({target}s) below minimum (3600s)")
+    if min_pause < 600:
+        raise ConfigError(f"loop.min_pause ({min_pause}s) below minimum (600s)")
+    if min_pause >= target:
+        raise ConfigError(f"loop.min_pause ({min_pause}s) must be less than target_interval ({target}s)")
+
+    return LoopConfig(target_interval=target, min_pause=min_pause)
 
 
 def load_config(path: str) -> Config:
@@ -213,6 +257,7 @@ def load_config(path: str) -> Config:
     orchestrator = _parse_orchestrator(raw.get("orchestrator", {}))
     notification = _parse_notification(raw.get("notification", {}))
     destination = _parse_destination(raw.get("destination", {}))
+    loop = _parse_loop(raw.get("loop", {}))
     ssh_key = raw.get("ssh_key")
 
     return Config(
@@ -221,6 +266,7 @@ def load_config(path: str) -> Config:
         orchestrator=orchestrator,
         notification=notification,
         destination=destination,
+        loop=loop,
         ssh_key=ssh_key,
     )
 

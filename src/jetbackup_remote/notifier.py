@@ -1,6 +1,7 @@
 """Email notification for jetbackup-remote."""
 
 import logging
+import os
 import smtplib
 import socket
 from email.mime.text import MIMEText
@@ -142,6 +143,77 @@ def build_summary_email(result: RunResult) -> tuple:
     return subject, body
 
 
+def _send_email(config: NotificationConfig, subject: str, body: str) -> bool:
+    """Send a single email. Never raises — returns False on failure."""
+    if not config.enabled or not config.to_addresses:
+        return True
+
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = config.from_address
+    msg["To"] = ", ".join(config.to_addresses)
+
+    try:
+        if config.smtp_tls:
+            smtp = smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=30)
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
+        else:
+            smtp = smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=30)
+
+        if config.smtp_user and config.smtp_password:
+            smtp.login(config.smtp_user, config.smtp_password)
+
+        smtp.sendmail(config.from_address, config.to_addresses, msg.as_string())
+        smtp.quit()
+        logger.info("Email sent: %s", subject)
+        return True
+    except (smtplib.SMTPException, OSError) as e:
+        logger.warning("Failed to send email '%s': %s", subject, e)
+        return False
+
+
+def build_timeout_email(
+    server_name: str,
+    job_label: str,
+    job_type: str,
+    duration_seconds: float,
+    cycle_progress: str,
+) -> tuple:
+    """Build timeout alert email subject and body."""
+    subject = f"[jetbackup-remote] TIMEOUT: {job_label} on {server_name}"
+    lines = [
+        f"Job: {job_label} ({job_type})",
+        f"Server: {server_name}",
+        f"Duration: {_format_duration(duration_seconds)}",
+        f"Action: Job aborted via stopQueueGroup",
+        f"Status: Moving to next job",
+        f"",
+        f"Cycle progress: {cycle_progress}",
+        f"",
+        f"--",
+        f"jetbackup-remote on {socket.gethostname()}",
+    ]
+    return subject, "\n".join(lines)
+
+
+def build_lifecycle_email(event: str, hostname: str) -> tuple:
+    """Build daemon lifecycle email (started/stopping)."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    subject = f"[jetbackup-remote] Daemon {event} on {hostname}"
+    lines = [
+        f"jetbackup-remote daemon {event}",
+        f"Host: {hostname}",
+        f"Time: {now}",
+        f"PID: {os.getpid()}",
+        f"",
+        f"--",
+        f"jetbackup-remote on {hostname}",
+    ]
+    return subject, "\n".join(lines)
+
+
 def send_notification(
     config: NotificationConfig,
     result: RunResult,
@@ -187,30 +259,30 @@ def send_notification(
         return True
 
     subject, body = build_summary_email(result)
+    return _send_email(config, subject, body)
 
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject
-    msg["From"] = config.from_address
-    msg["To"] = ", ".join(config.to_addresses)
 
-    try:
-        if config.smtp_tls:
-            smtp = smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=30)
-            smtp.ehlo()
-            smtp.starttls()
-            smtp.ehlo()
-        else:
-            smtp = smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=30)
-
-        if config.smtp_user and config.smtp_password:
-            smtp.login(config.smtp_user, config.smtp_password)
-
-        smtp.sendmail(config.from_address, config.to_addresses, msg.as_string())
-        smtp.quit()
-
-        logger.info("Notification sent to %s", ", ".join(config.to_addresses))
+def send_timeout_alert(config, server_name, job_label, job_type, duration_seconds, cycle_progress):
+    """Send immediate timeout alert email. Never raises."""
+    if not getattr(config, "on_timeout", True):
         return True
+    subject, body = build_timeout_email(server_name, job_label, job_type, duration_seconds, cycle_progress)
+    return _send_email(config, subject, body)
 
-    except (smtplib.SMTPException, OSError) as e:
-        logger.error("Failed to send notification: %s", e)
+
+def send_daemon_lifecycle(config, event, hostname=None):
+    """Send daemon lifecycle email (started/stopping). Never raises."""
+    if not getattr(config, "on_daemon_lifecycle", True):
+        return True
+    hostname = hostname or socket.gethostname()
+    subject, body = build_lifecycle_email(event, hostname)
+    return _send_email(config, subject, body)
+
+
+def send_cycle_summary(config, result):
+    """Send cycle summary email. Never raises."""
+    try:
+        return send_notification(config, result)
+    except Exception as e:
+        logger.warning("Failed to send cycle summary: %s", e)
         return False

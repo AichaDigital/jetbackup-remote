@@ -3,10 +3,12 @@
 import json
 import os
 import tempfile
+import time
 import unittest
+import unittest.mock
 from unittest.mock import patch, MagicMock, call
 
-from jetbackup_remote.config import Config, DestinationConfig, OrchestratorConfig, NotificationConfig, load_config
+from jetbackup_remote.config import Config, DestinationConfig, OrchestratorConfig, NotificationConfig, LoopConfig, load_config
 from jetbackup_remote.models import Job, JobRun, JobStatus, JobType, QueueGroupStatus, Server, ServerRun, RunResult
 from jetbackup_remote.ssh import SSHError, SSHResult
 from jetbackup_remote.jetbackup_api import JetBackupAPIError
@@ -1016,6 +1018,228 @@ class TestGlobalPreflightCheck(unittest.TestCase):
         orch = Orchestrator(config)
         result = orch._global_preflight_check()
         self.assertFalse(result)
+
+
+class TestOrchestratorV030(unittest.TestCase):
+    """Tests for v0.3.0 orchestrator features."""
+
+    def _make_config(self):
+        """Create minimal Config for testing."""
+        return Config(
+            servers={"srv1": Server(name="srv1", host="test.com", destination_id="d1")},
+            jobs=[Job(job_id="j1", server_name="srv1", label="TestJob")],
+            orchestrator=OrchestratorConfig(
+                job_timeout=86400,
+                state_file="/tmp/test-jetbackup-state.json",
+            ),
+            notification=NotificationConfig(enabled=False),
+            destination=DestinationConfig(),
+            loop=LoopConfig(target_interval=100, min_pause=10),
+        )
+
+    def test_per_job_timeout_used(self):
+        config = self._make_config()
+        orch = Orchestrator(config)
+        job = Job(job_id="j1", server_name="srv1", label="FastJob", timeout=3600)
+        server = config.servers["srv1"]
+        job_run = JobRun(job=job)
+        job_run.start()
+        with unittest.mock.patch(
+            "jetbackup_remote.orchestrator.is_job_running", return_value=False
+        ):
+            orch._poll_completion_only(server, job, job_run)
+        self.assertEqual(job_run.status, JobStatus.COMPLETED)
+
+    def test_per_job_timeout_fallback_to_global(self):
+        config = self._make_config()
+        config.orchestrator.job_timeout = 5  # very short for test
+        orch = Orchestrator(config)
+        job = Job(job_id="j1", server_name="srv1", label="NoTimeout")  # timeout=None
+        server = config.servers["srv1"]
+        job_run = JobRun(job=job)
+        job_run.start()
+        # Job keeps "running" until global timeout
+        call_count = 0
+        def mock_running(*a, **kw):
+            nonlocal call_count
+            call_count += 1
+            return True  # always running
+        with unittest.mock.patch("jetbackup_remote.orchestrator.is_job_running", side_effect=mock_running):
+            with unittest.mock.patch.object(orch, "_abort_running_job"):
+                with unittest.mock.patch("jetbackup_remote.orchestrator.send_timeout_alert", return_value=True):
+                    orch._poll_completion_only(server, job, job_run)
+        self.assertEqual(job_run.status, JobStatus.TIMEOUT)
+
+    def test_write_state_creates_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_config()
+            config.orchestrator.state_file = os.path.join(tmpdir, "state.json")
+            orch = Orchestrator(config)
+            orch._write_state({"version": "0.3.0", "test": True})
+            with open(config.orchestrator.state_file) as f:
+                data = json.load(f)
+            self.assertEqual(data["version"], "0.3.0")
+            self.assertTrue(data["test"])
+
+    def test_write_state_overwrites(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_config()
+            config.orchestrator.state_file = os.path.join(tmpdir, "state.json")
+            orch = Orchestrator(config)
+            orch._write_state({"old": True})
+            orch._write_state({"new": True})
+            with open(config.orchestrator.state_file) as f:
+                data = json.load(f)
+            self.assertNotIn("old", data)
+            self.assertTrue(data["new"])
+
+    def test_interruptible_sleep_exits_on_shutdown(self):
+        config = self._make_config()
+        orch = Orchestrator(config)
+        orch._shutdown_requested = True
+        start = time.time()
+        orch._interruptible_sleep(300)
+        self.assertLess(time.time() - start, 2)
+
+    def test_interruptible_sleep_sleeps(self):
+        config = self._make_config()
+        orch = Orchestrator(config)
+        start = time.time()
+        orch._interruptible_sleep(1)  # 1 second
+        elapsed = time.time() - start
+        self.assertGreaterEqual(elapsed, 0.9)
+
+    def test_run_forever_executes_and_stops(self):
+        config = self._make_config()
+        orch = Orchestrator(config)
+        cycle_count = 0
+
+        def mock_run(**kwargs):
+            nonlocal cycle_count
+            cycle_count += 1
+            if cycle_count >= 2:
+                orch._shutdown_requested = True
+            result = RunResult()
+            result.start()
+            result.finish()
+            return result
+
+        with unittest.mock.patch.object(orch, "run", side_effect=mock_run):
+            with unittest.mock.patch.object(orch, "_interruptible_sleep"):
+                with unittest.mock.patch("jetbackup_remote.orchestrator.send_daemon_lifecycle"):
+                    with unittest.mock.patch("jetbackup_remote.orchestrator.send_cycle_summary"):
+                        orch.run_forever()
+
+        self.assertEqual(cycle_count, 2)
+
+    def test_run_forever_calculates_pause(self):
+        config = self._make_config()
+        config.loop.target_interval = 100
+        config.loop.min_pause = 10
+        orch = Orchestrator(config)
+        sleep_values = []
+
+        def capture_sleep(seconds):
+            sleep_values.append(seconds)
+            orch._shutdown_requested = True
+
+        mock_result = RunResult()
+        mock_result.start()
+        mock_result.finish()  # ~instant
+
+        with unittest.mock.patch.object(orch, "run", return_value=mock_result):
+            with unittest.mock.patch.object(orch, "_interruptible_sleep", side_effect=capture_sleep):
+                with unittest.mock.patch("jetbackup_remote.orchestrator.send_daemon_lifecycle"):
+                    orch.run_forever()
+
+        self.assertEqual(len(sleep_values), 1)
+        self.assertGreaterEqual(sleep_values[0], 10)  # at least min_pause
+
+    def test_build_run_state_consecutive_failures(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_config()
+            config.orchestrator.state_file = os.path.join(tmpdir, "state.json")
+            orch = Orchestrator(config)
+            orch._daemon_started_at = "2026-01-01T00:00:00Z"
+
+            # Write a previous state with 2 consecutive failures
+            prev_state = {
+                "last_run": {
+                    "servers": {
+                        "srv1": {"consecutive_failures": 2}
+                    }
+                }
+            }
+            with open(config.orchestrator.state_file, "w") as f:
+                json.dump(prev_state, f)
+
+            # Create a result where srv1 has all jobs skipped (unreachable)
+            result = RunResult()
+            result.start()
+            sr = ServerRun(server_name="srv1", destination_id="d1")
+            jr = JobRun(job=Job(job_id="j1", server_name="srv1"))
+            jr.skip("SSH unreachable")
+            sr.job_runs.append(jr)
+            result.add_server_run(sr)
+            result.add_job_run(jr)
+            result.finish()
+
+            state = orch._build_run_state(result, "2026-01-02T00:00:00Z", True)
+            self.assertEqual(state["last_run"]["servers"]["srv1"]["consecutive_failures"], 3)
+
+    def test_build_run_state_resets_on_success(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_config()
+            config.orchestrator.state_file = os.path.join(tmpdir, "state.json")
+            orch = Orchestrator(config)
+            orch._daemon_started_at = "2026-01-01T00:00:00Z"
+
+            # Previous failures
+            prev_state = {
+                "last_run": {
+                    "servers": {
+                        "srv1": {"consecutive_failures": 5}
+                    }
+                }
+            }
+            with open(config.orchestrator.state_file, "w") as f:
+                json.dump(prev_state, f)
+
+            result = RunResult()
+            result.start()
+            sr = ServerRun(server_name="srv1", destination_id="d1")
+            jr = JobRun(job=Job(job_id="j1", server_name="srv1"))
+            jr.complete()
+            sr.job_runs.append(jr)
+            result.add_server_run(sr)
+            result.add_job_run(jr)
+            result.finish()
+
+            state = orch._build_run_state(result, "2026-01-02T00:00:00Z", True)
+            self.assertEqual(state["last_run"]["servers"]["srv1"]["consecutive_failures"], 0)
+
+    def test_build_run_state_notification_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_config()
+            config.orchestrator.state_file = os.path.join(tmpdir, "state.json")
+            orch = Orchestrator(config)
+            orch._daemon_started_at = "2026-01-01T00:00:00Z"
+
+            result = RunResult()
+            result.start()
+            result.finish()
+
+            state = orch._build_run_state(result, "next", notification_ok=False)
+            self.assertEqual(state["last_notification_error"], "SMTP delivery failed")
+
+    def tearDown(self):
+        # Clean up state file if created in /tmp
+        import glob
+        for f in glob.glob("/tmp/test-jetbackup-state*.json"):
+            try:
+                os.unlink(f)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

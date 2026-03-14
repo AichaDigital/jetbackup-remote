@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import os
 import sys
 from typing import Optional
 
@@ -101,11 +102,79 @@ def cmd_run(args) -> int:
             orch.release_lock()
 
 
+def cmd_daemon(args) -> int:
+    """Run as a persistent daemon with loop."""
+    config = _load_and_validate_config(args)
+    if config is None:
+        return 1
+
+    setup_logging(
+        log_file=config.orchestrator.log_file,
+        max_bytes=config.orchestrator.log_max_bytes,
+        backup_count=config.orchestrator.log_backup_count,
+        verbose=args.verbose,
+    )
+
+    orch = Orchestrator(config)
+
+    try:
+        orch.acquire_lock()
+    except LockError as e:
+        logger.error(str(e))
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        orch.install_signal_handlers()
+        orch.run_forever()
+        return 0
+    finally:
+        orch.release_lock()
+
+
 def cmd_status(args) -> int:
     """Show current job status on servers."""
     config = _load_and_validate_config(args)
     if config is None:
         return 1
+
+    # Read state file if available
+    state = None
+    state_file = getattr(config.orchestrator, "state_file", None)
+    if state_file and os.path.exists(state_file):
+        try:
+            with open(state_file) as f:
+                state = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if state and not getattr(args, "json", False):
+        pid = state.get("daemon_pid")
+        daemon_running = False
+        if pid:
+            try:
+                os.kill(pid, 0)
+                daemon_running = True
+            except (OSError, TypeError):
+                pass
+
+        if daemon_running:
+            print(f"Daemon: running (pid {pid})")
+        else:
+            print(f"Daemon: not running (last pid {pid})")
+
+        last_run = state.get("last_run")
+        if last_run:
+            finished = last_run.get("finished_at", "unknown")
+            ok = last_run.get("completed", 0)
+            fail = last_run.get("failed", 0)
+            tout = last_run.get("timeout", 0)
+            print(f"Last cycle: {finished} ({ok} OK, {tout} TIMEOUT, {fail} FAILED)")
+
+        next_run = state.get("next_run_at")
+        if next_run:
+            print(f"Next cycle: ~{next_run}")
+        print()
 
     results = {}
     for name, server in config.servers.items():
@@ -376,6 +445,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Force activate destination even if disabled (overrides skip_if_disabled)",
     )
 
+    # daemon
+    subparsers.add_parser("daemon", help="Run as persistent daemon with loop")
+
     # status
     p_status = subparsers.add_parser("status", help="Show job status on servers")
     p_status.add_argument("--server", help="Only show this server")
@@ -412,6 +484,7 @@ def main(argv=None) -> int:
 
     commands = {
         "run": cmd_run,
+        "daemon": cmd_daemon,
         "status": cmd_status,
         "test": cmd_test,
         "list": cmd_list,

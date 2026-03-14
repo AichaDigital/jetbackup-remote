@@ -1,3 +1,3 @@
 """jetbackup-remote: Remote orchestrator for JetBackup5 backup serialization."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

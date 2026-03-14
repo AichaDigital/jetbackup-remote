@@ -27,6 +27,7 @@ from .models import (
     Job, JobRun, JobStatus, QueueGroupStatus,
     RunResult, Server, ServerRun,
 )
+from .notifier import send_timeout_alert, send_daemon_lifecycle, send_cycle_summary
 from .ssh import SSHError
 
 logger = logging.getLogger("jetbackup_remote.orchestrator")
@@ -217,7 +218,7 @@ class Orchestrator:
         On timeout, aborts the job via stopQueueGroup to preserve FIFO invariant.
         """
         poll_interval = self.config.orchestrator.poll_interval
-        timeout = self.config.orchestrator.job_timeout
+        timeout = job.timeout if job.timeout else self.config.orchestrator.job_timeout
         start_time = time.time()
 
         while True:
@@ -238,6 +239,14 @@ class Orchestrator:
                 )
                 self._abort_running_job(server, job, job_run)
                 job_run.timeout()
+                send_timeout_alert(
+                    self.config.notification,
+                    server_name=server.name,
+                    job_label=job.display_name,
+                    job_type=job.job_type.value,
+                    duration_seconds=elapsed,
+                    cycle_progress="",
+                )
                 return
 
             try:
@@ -899,6 +908,183 @@ class Orchestrator:
                     job_run.error_message = "Job left ENABLED after execution"
 
         return job_run
+
+    # --- State file ---
+
+    def _write_state(self, data: dict) -> None:
+        """Write state file atomically (temp + rename)."""
+        import json as _json
+        import tempfile
+        state_file = self.config.orchestrator.state_file
+        try:
+            dir_path = os.path.dirname(state_file)
+            if dir_path and not os.path.exists(dir_path):
+                os.makedirs(dir_path, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(dir=dir_path or ".", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    _json.dump(data, f, indent=2)
+                os.rename(tmp_path, state_file)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except Exception as e:
+            logger.warning("Failed to write state file %s: %s", state_file, e)
+
+    def _read_previous_state(self) -> dict:
+        """Read previous state file for consecutive_failures carry-over."""
+        import json as _json
+        state_file = self.config.orchestrator.state_file
+        try:
+            if os.path.exists(state_file):
+                with open(state_file) as f:
+                    return _json.load(f)
+        except (ValueError, OSError) as e:
+            logger.warning("Failed to read previous state: %s", e)
+        return {}
+
+    def _build_run_state(self, result, next_run_iso: str, notification_ok: bool) -> dict:
+        """Build state dict from RunResult with consecutive_failures tracking."""
+        from datetime import datetime, timezone
+
+        prev = self._read_previous_state()
+        prev_last_run = prev.get("last_run") or {}
+        prev_servers = prev_last_run.get("servers", {})
+
+        servers = {}
+        for sr in result.server_runs:
+            prev_failures = prev_servers.get(sr.server_name, {}).get("consecutive_failures", 0)
+            has_ok = any(jr.status == JobStatus.COMPLETED for jr in sr.job_runs)
+            all_skipped = all(jr.status == JobStatus.SKIPPED for jr in sr.job_runs) if sr.job_runs else True
+
+            if has_ok:
+                consecutive = 0
+            elif all_skipped:
+                consecutive = prev_failures + 1
+            else:
+                consecutive = prev_failures
+
+            total_duration = sum((jr.duration_seconds or 0) for jr in sr.job_runs)
+
+            status = "ok"
+            if any(jr.status == JobStatus.TIMEOUT for jr in sr.job_runs):
+                status = "timeout"
+            elif any(jr.status == JobStatus.FAILED for jr in sr.job_runs):
+                status = "failed"
+            elif all_skipped:
+                status = "unreachable"
+
+            servers[sr.server_name] = {
+                "status": status,
+                "jobs": len(sr.job_runs),
+                "duration": int(total_duration),
+                "consecutive_failures": consecutive,
+            }
+
+        started_iso = None
+        if result.started_at:
+            started_iso = datetime.fromtimestamp(result.started_at, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        finished_iso = None
+        if result.finished_at:
+            finished_iso = datetime.fromtimestamp(result.finished_at, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+        return {
+            "version": "0.3.0",
+            "daemon_pid": os.getpid(),
+            "daemon_started_at": getattr(self, "_daemon_started_at", None),
+            "last_notification_error": None if notification_ok else "SMTP delivery failed",
+            "last_run": {
+                "started_at": started_iso,
+                "finished_at": finished_iso,
+                "duration_seconds": int(result.duration_seconds or 0),
+                "total_jobs": result.total,
+                "completed": result.completed,
+                "failed": result.failed,
+                "timeout": result.timed_out,
+                "skipped": result.skipped,
+                "success": result.success,
+                "servers": servers,
+            },
+            "next_run_at": next_run_iso,
+        }
+
+    # --- Interruptible sleep ---
+
+    def _interruptible_sleep(self, seconds: float) -> None:
+        """Sleep that can be interrupted by SIGTERM. Checks every 30s."""
+        interval = 30
+        remaining = seconds
+        while remaining > 0 and not self._shutdown_requested:
+            sleep_time = min(interval, remaining)
+            time.sleep(sleep_time)
+            remaining -= sleep_time
+
+    # --- Daemon loop ---
+
+    def run_forever(self) -> None:
+        """Run the orchestration loop indefinitely.
+
+        Executes run() cycles with calculated pause between them.
+        Exits cleanly on SIGTERM/SIGINT.
+        """
+        from datetime import datetime, timezone
+        import socket
+
+        hostname = socket.gethostname()
+        self._daemon_started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+        logger.info("Daemon starting on %s (pid %d)", hostname, os.getpid())
+
+        # Write initial state
+        self._write_state({
+            "version": "0.3.0",
+            "daemon_pid": os.getpid(),
+            "daemon_started_at": self._daemon_started_at,
+            "last_notification_error": None,
+            "last_run": None,
+            "next_run_at": None,
+        })
+
+        # Send lifecycle email
+        send_daemon_lifecycle(self.config.notification, "started", hostname)
+
+        try:
+            while not self._shutdown_requested:
+                result = self.run()
+
+                cycle_duration = result.duration_seconds or 0
+                pause = max(
+                    self.config.loop.target_interval - cycle_duration,
+                    self.config.loop.min_pause,
+                )
+                next_run_ts = time.time() + pause
+                next_run_iso = datetime.fromtimestamp(next_run_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+                # Send summary if needed
+                notification_ok = True
+                if not result.success:
+                    notification_ok = send_cycle_summary(self.config.notification, result)
+                elif getattr(self.config.notification, "on_complete", False):
+                    notification_ok = send_cycle_summary(self.config.notification, result)
+
+                state_data = self._build_run_state(result, next_run_iso, notification_ok)
+                self._write_state(state_data)
+
+                if self._shutdown_requested:
+                    break
+
+                logger.info(
+                    "Cycle complete. Sleeping %.0fs (next run ~%s)",
+                    pause, next_run_iso,
+                )
+                self._interruptible_sleep(pause)
+
+        finally:
+            send_daemon_lifecycle(self.config.notification, "stopping", hostname)
+            logger.info("Daemon stopped")
 
     # --- Legacy single-job executor (backward compatible) ---
 

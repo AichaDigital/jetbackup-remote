@@ -1,12 +1,17 @@
 """Tests for jetbackup_remote.notifier."""
 
+import smtplib
 import unittest
+import unittest.mock
 from unittest.mock import patch, MagicMock
 
 from jetbackup_remote.config import NotificationConfig
 from jetbackup_remote.models import Job, JobRun, JobStatus, QueueGroupStatus, RunResult, ServerRun
 from jetbackup_remote.notifier import (
     build_summary_email, send_notification, _format_duration,
+    build_timeout_email, build_lifecycle_email,
+    send_timeout_alert, send_daemon_lifecycle, send_cycle_summary,
+    _send_email,
 )
 
 
@@ -311,6 +316,91 @@ class TestQGStatusInEmail(unittest.TestCase):
         subject, body = build_summary_email(result)
         self.assertIn("QG Status", body)
         self.assertIn("COMPLETED", body)
+
+
+class TestNotifierV030(unittest.TestCase):
+    """Tests for v0.3.0 notifier features."""
+
+    def test_build_timeout_email_subject(self):
+        subject, body = build_timeout_email(
+            server_name="servidor30",
+            job_label="RasBackup",
+            job_type="accounts",
+            duration_seconds=86403,
+            cycle_progress="3/10 jobs completed",
+        )
+        self.assertIn("[jetbackup-remote] TIMEOUT", subject)
+        self.assertIn("servidor30", subject)
+        self.assertIn("RasBackup", body)
+
+    def test_build_timeout_email_body_content(self):
+        _, body = build_timeout_email("srv", "Job1", "database", 3600, "1/5")
+        self.assertIn("database", body)
+        self.assertIn("1/5", body)
+        self.assertIn("stopQueueGroup", body)
+
+    def test_build_lifecycle_email_started(self):
+        subject, body = build_lifecycle_email(event="started", hostname="raspberrypinas")
+        self.assertIn("started", subject.lower())
+        self.assertIn("raspberrypinas", body)
+
+    def test_build_lifecycle_email_stopping(self):
+        subject, body = build_lifecycle_email(event="stopping", hostname="testhost")
+        self.assertIn("stopping", subject.lower())
+
+    def test_send_timeout_alert_smtp_failure_no_exception(self):
+        """send_timeout_alert must never raise on SMTP failure."""
+        config = NotificationConfig(
+            enabled=True,
+            to_addresses=["test@test.com"],
+            on_timeout=True,
+        )
+        with unittest.mock.patch("jetbackup_remote.notifier.smtplib.SMTP",
+                                  side_effect=smtplib.SMTPException("fail")):
+            result = send_timeout_alert(
+                config, server_name="srv", job_label="job", job_type="accounts",
+                duration_seconds=100, cycle_progress="1/1",
+            )
+        self.assertFalse(result)
+
+    def test_send_daemon_lifecycle_smtp_failure_no_exception(self):
+        config = NotificationConfig(
+            enabled=True,
+            to_addresses=["test@test.com"],
+        )
+        with unittest.mock.patch("jetbackup_remote.notifier.smtplib.SMTP",
+                                  side_effect=OSError("Connection refused")):
+            result = send_daemon_lifecycle(config, "started", "testhost")
+        self.assertFalse(result)
+
+    def test_send_cycle_summary_never_raises(self):
+        config = NotificationConfig(
+            enabled=True,
+            to_addresses=["test@test.com"],
+            on_failure=True,
+        )
+        # Create a result that would trigger notification
+        result = RunResult()
+        result.start()
+        jr = JobRun(job=Job(job_id="j1", server_name="s1"))
+        jr.fail("test error")
+        result.add_job_run(jr)
+        result.finish()
+
+        with unittest.mock.patch("jetbackup_remote.notifier.smtplib.SMTP",
+                                  side_effect=smtplib.SMTPException("fail")):
+            ret = send_cycle_summary(config, result)
+        self.assertFalse(ret)
+
+    def test_send_email_disabled_returns_true(self):
+        config = NotificationConfig(enabled=False)
+        result = _send_email(config, "test", "body")
+        self.assertTrue(result)
+
+    def test_send_timeout_alert_respects_on_timeout_false(self):
+        config = NotificationConfig(enabled=True, on_timeout=False, to_addresses=["t@t.com"])
+        result = send_timeout_alert(config, "srv", "job", "accounts", 100, "1/1")
+        self.assertTrue(result)  # Returns True (skipped by policy)
 
 
 if __name__ == "__main__":

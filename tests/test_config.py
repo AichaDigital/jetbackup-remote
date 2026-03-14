@@ -271,7 +271,7 @@ class TestJobTimeoutValidation(unittest.TestCase):
 
     def test_timeout_exceeds_maximum(self):
         data = dict(MINIMAL_CONFIG)
-        data["orchestrator"] = {"job_timeout": 86401}
+        data["orchestrator"] = {"job_timeout": 172801}
         path = _write_config(data)
         try:
             with self.assertRaises(ConfigError) as ctx:
@@ -418,6 +418,130 @@ class TestDestinationConfig(unittest.TestCase):
             )
         finally:
             os.unlink(path)
+
+
+class TestConfigV030(unittest.TestCase):
+    """Tests for v0.3.0 config features."""
+
+    def _make_config_dict(self):
+        """Minimal valid config dict."""
+        return {
+            "servers": {
+                "srv1": {"host": "test.example.com", "destination_id": "dest1"}
+            },
+            "jobs": [
+                {"job_id": "job1", "server": "srv1", "label": "TestJob", "type": "accounts"}
+            ],
+            "orchestrator": {"job_timeout": 7200},
+        }
+
+    def _write_and_load(self, data):
+        """Write config dict to temp file and load it."""
+        fd, path = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f)
+            return load_config(path)
+        finally:
+            os.unlink(path)
+
+    def test_loop_config_defaults(self):
+        from jetbackup_remote.config import LoopConfig
+        lc = LoopConfig()
+        self.assertEqual(lc.target_interval, 86400)
+        self.assertEqual(lc.min_pause, 3600)
+
+    def test_loop_config_parsed(self):
+        data = self._make_config_dict()
+        data["loop"] = {"target_interval": 43200, "min_pause": 1800}
+        config = self._write_and_load(data)
+        self.assertEqual(config.loop.target_interval, 43200)
+        self.assertEqual(config.loop.min_pause, 1800)
+
+    def test_loop_min_pause_too_low(self):
+        data = self._make_config_dict()
+        data["loop"] = {"min_pause": 100}
+        with self.assertRaises(ConfigError):
+            self._write_and_load(data)
+
+    def test_loop_min_pause_ge_target(self):
+        data = self._make_config_dict()
+        data["loop"] = {"target_interval": 3600, "min_pause": 3600}
+        with self.assertRaises(ConfigError):
+            self._write_and_load(data)
+
+    def test_state_file_in_orchestrator(self):
+        data = self._make_config_dict()
+        data["orchestrator"]["state_file"] = "/tmp/test-state.json"
+        config = self._write_and_load(data)
+        self.assertEqual(config.orchestrator.state_file, "/tmp/test-state.json")
+
+    def test_per_job_timeout_parsed(self):
+        data = self._make_config_dict()
+        data["jobs"][0]["timeout"] = 7200
+        config = self._write_and_load(data)
+        self.assertEqual(config.jobs[0].timeout, 7200)
+
+    def test_per_job_timeout_too_low(self):
+        data = self._make_config_dict()
+        data["jobs"][0]["timeout"] = 500
+        with self.assertRaises(ConfigError):
+            self._write_and_load(data)
+
+    def test_per_job_timeout_none_by_default(self):
+        data = self._make_config_dict()
+        config = self._write_and_load(data)
+        self.assertIsNone(config.jobs[0].timeout)
+
+    def test_on_daemon_lifecycle_default_true(self):
+        nc = NotificationConfig()
+        self.assertTrue(nc.on_daemon_lifecycle)
+
+    def test_on_daemon_lifecycle_parsed(self):
+        data = self._make_config_dict()
+        data["notification"] = {"on_daemon_lifecycle": False}
+        config = self._write_and_load(data)
+        self.assertFalse(config.notification.on_daemon_lifecycle)
+
+    def test_from_env_password(self):
+        os.environ["TEST_SMTP_PASS"] = "secret123"
+        try:
+            data = self._make_config_dict()
+            data["notification"] = {
+                "enabled": True,
+                "smtp_password": "FROM_ENV:TEST_SMTP_PASS",
+                "to_addresses": ["test@test.com"],
+            }
+            config = self._write_and_load(data)
+            self.assertEqual(config.notification.smtp_password, "secret123")
+        finally:
+            del os.environ["TEST_SMTP_PASS"]
+
+    def test_from_env_missing_var(self):
+        data = self._make_config_dict()
+        data["notification"] = {
+            "smtp_password": "FROM_ENV:NONEXISTENT_VAR_12345",
+        }
+        with self.assertRaises(ConfigError):
+            self._write_and_load(data)
+
+    def test_max_job_timeout_allows_86400(self):
+        data = self._make_config_dict()
+        data["orchestrator"]["job_timeout"] = 86400
+        config = self._write_and_load(data)
+        self.assertEqual(config.orchestrator.job_timeout, 86400)
+
+    def test_max_job_timeout_allows_172800(self):
+        data = self._make_config_dict()
+        data["orchestrator"]["job_timeout"] = 172800
+        config = self._write_and_load(data)
+        self.assertEqual(config.orchestrator.job_timeout, 172800)
+
+    def test_max_job_timeout_rejects_above(self):
+        data = self._make_config_dict()
+        data["orchestrator"]["job_timeout"] = 200000
+        with self.assertRaises(ConfigError):
+            self._write_and_load(data)
 
 
 if __name__ == "__main__":

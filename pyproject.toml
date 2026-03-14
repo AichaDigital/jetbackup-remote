@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jetbackup-remote"
-version = "0.2.0"
+version = "0.3.0"
 description = "Remote orchestrator for JetBackup5 backup serialization"
 readme = "README.md"
 license = "AGPL-3.0-or-later"

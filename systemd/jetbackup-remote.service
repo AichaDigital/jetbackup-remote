@@ -1,15 +1,16 @@
 [Unit]
-Description=JetBackup Remote Orchestrator
+Description=JetBackup Remote Orchestrator Daemon
 Documentation=https://github.com/AichaDigital/jetbackup-remote
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
+Type=simple
+ExecStart=/usr/bin/python3 -m jetbackup_remote -c /etc/jetbackup-remote/config.json daemon
+Restart=on-failure
+RestartSec=300
 Environment=PYTHONPATH=/opt/jetbackup-remote/src
-ExecStart=/usr/bin/python3 -m jetbackup_remote -c /etc/jetbackup-remote/config.json run
-User=root
-Group=root
+EnvironmentFile=/etc/jetbackup-remote/env
 
 # Logging
 StandardOutput=journal
@@ -18,7 +19,7 @@ SyslogIdentifier=jetbackup-remote
 
 # Security hardening (ProtectHome disabled: needs /root/.ssh for SSH keys)
 ProtectSystem=strict
-ReadWritePaths=/var/log /tmp /etc/jetbackup-remote
+ReadWritePaths=/var/log /tmp /etc/jetbackup-remote /var/lib/jetbackup-remote
 PrivateTmp=true
 NoNewPrivileges=true
 ProtectKernelModules=true
